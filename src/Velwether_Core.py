@@ -1700,7 +1700,8 @@ def main():
 
     try:
         print(pyfiglet.figlet_format("Avelia",font="slant"))
-        print("OpenAI API Hybrid Web Search Edition")
+        print(" OpenAI API Hybrid Web Search Edition")
+        print(" Anvelk Mainframe AI")
         print("")
         if DVD_MODE == 1:
             print("For DVD Mode")
