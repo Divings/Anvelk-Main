@@ -1,0 +1,6 @@
+requests
+mysql-connector-python
+pyfiglet
+cryptography
+dropbox
+pyttsx3
