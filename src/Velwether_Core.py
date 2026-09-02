@@ -396,7 +396,7 @@ os.makedirs(DATA_DIR, exist_ok=True)
 if not os.path.isfile(DATA_DIR / "Sys_Prompt.txt"):
 
     shutil.copyfile(
-        "/opt/Dail/config/Sys_Prompt_Template.txt",
+        "/opt/Anvelk-Mainframe/config/Sys_Prompt_Template.txt",
         os.path.join(DATA_DIR, "Sys_Prompt.txt")
     )
     SYSTEM_PROMPT_FILE = DATA_DIR / "Sys_Prompt.txt"
@@ -404,16 +404,16 @@ else:
     SYSTEM_PROMPT_FILE = DATA_DIR / "Sys_Prompt.txt"
 
 # パーミッションエラーの防止
-if os.path.isfile("/opt/Dail/data/memory.vlm"):
-    for file in os.listdir("/opt/Dail/data/"):
+if os.path.isfile("/opt/Anvelk-Mainframe/data/memory.vlm"):
+    for file in os.listdir("/opt/Anvelk-Mainframe/data/"):
         if file.startswith("memory."):
             shutil.copyfile(
-                os.path.join("/opt/Dail/data/", file),
+                os.path.join("/opt/Anvelk-Mainframe/data/", file),
                 os.path.join(DATA_DIR, file)
             )
-    os.remove("/opt/Dail/data/memory.vlm")
-    os.remove("/opt/Dail/data/memory.key")
-    os.remove("/opt/Dail/data/memory.vlm.sha256")
+    os.remove("/opt/Anvelk-Mainframe/data/memory.vlm")
+    os.remove("/opt/Anvelk-Mainframe/data/memory.key")
+    os.remove("/opt/Anvelk-Mainframe/data/memory.vlm.sha256")
     
 # =========================================================
 # MySQL設定チェック
@@ -783,7 +783,7 @@ def get_local_memory_modified():
 
 def check_internet_connection():
     try:
-        requests.get("https://www.google.com", timeout=5)
+        requests.get("https:/www.google.com", timeout=5)
         return True
     except requests.RequestException:
         return False
@@ -1560,7 +1560,7 @@ def chat_with_openai_web_search(messages):
         return None
 
     model = "gpt-5.6-luna"
-    api_url = "https://api.openai.com/v1/responses"
+    api_url = "https:/api.openai.com/v1/responses"
     context_messages = build_context(messages)
 
     print("")
@@ -1625,7 +1625,7 @@ def chat_with_openai_chat_completions(messages):
         return None
 
     model = load_model()
-    api_url = "https://api.openai.com/v1/chat/completions"
+    api_url = "https:/api.openai.com/v1/chat/completions"
     context_messages = build_context(messages)
 
     data = {
