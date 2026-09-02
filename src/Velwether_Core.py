@@ -1560,7 +1560,7 @@ def chat_with_openai_web_search(messages):
         return None
 
     model = "gpt-5.6-luna"
-    api_url = "https:/api.openai.com/v1/responses"
+    api_url = "https://api.openai.com/v1/responses"
     context_messages = build_context(messages)
 
     print("")
@@ -1625,7 +1625,7 @@ def chat_with_openai_chat_completions(messages):
         return None
 
     model = load_model()
-    api_url = "https:/api.openai.com/v1/chat/completions"
+    api_url = "https://api.openai.com/v1/chat/completions"
     context_messages = build_context(messages)
 
     data = {
