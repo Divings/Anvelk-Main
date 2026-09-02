@@ -783,7 +783,7 @@ def get_local_memory_modified():
 
 def check_internet_connection():
     try:
-        requests.get("https:/www.google.com", timeout=5)
+        requests.get("https://www.google.com", timeout=5)
         return True
     except requests.RequestException:
         return False
