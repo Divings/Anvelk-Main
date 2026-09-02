@@ -1,0 +1,92 @@
+# ==============================
+# Python
+# ==============================
+
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Python package / build
+build/
+dist/
+*.egg-info/
+.eggs/
+pip-wheel-metadata/
+
+# ==============================
+# IDE / Editor
+# ==============================
+
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# ==============================
+# Logs
+# ==============================
+
+logs/
+*.log
+
+# ==============================
+# Runtime / User Data
+# ==============================
+
+data/
+*.vlm
+*.sha256
+*.key
+*.tmp
+
+# ==============================
+# Configuration / Secrets
+# ==============================
+
+config/database.conf
+config/config.ini
+config/dropbox.ini
+
+.env
+.env.*
+*.env
+
+# API keys / credentials
+*.token
+*.secret
+credentials.json
+
+# ==============================
+# RPM / Build
+# ==============================
+
+rpmbuild/
+*.rpm
+*.src.rpm
+*.tar.gz
+
+# ==============================
+# Temporary files
+# ==============================
+
+tmp/
+temp/
+.cache/
+
+# ==============================
+# Backup files
+# ==============================
+
+*.bak
+*.backup
+*.old
