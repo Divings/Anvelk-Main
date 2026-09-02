@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 # Copyright (c) 2026 Anvelk Innovations
-# Licensed under the MIT License.
+# Licensed under the GPL v3.0 License.
 # See LICENSE for details.
 import requests
 import os
@@ -1699,8 +1699,9 @@ def main():
     c=0
 
     try:
-        print(pyfiglet.figlet_format("Velwether",font="slant"))
+        print(pyfiglet.figlet_format("Avelia",font="slant"))
         print("OpenAI API Hybrid Web Search Edition")
+        print("")
         if DVD_MODE == 1:
             print("For DVD Mode")
         print("")
@@ -1711,7 +1712,7 @@ def main():
     if c==0:
         print("")
         print(" ========================================")
-        print("              Velwether")
+        print("              Avelia")
         print("          OpenAI API Hybrid Web Search Edition")
         print(" ========================================")
     print("")
