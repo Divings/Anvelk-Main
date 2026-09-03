@@ -70,7 +70,7 @@ sys.stderr.reconfigure(
 # =========================================================
 # MySQL 設定
 # =========================================================
-# DB接続情報は /opt/config/database.conf から取得する。
+# DB接続情報は /opt/Anvelk-Mainframe/config/database.conf から取得する。
 #
 # [DATABASE]
 # host = localhost
@@ -84,7 +84,7 @@ DATABASE_CONFIG_FILE = "/opt/Anvelk-Mainframe/config/database.conf"
 
 
 def load_database_config():
-    """/opt/config/database.conf からMySQL接続情報を読み込む。"""
+    """/opt/Anvelk-Mainframe/config/database.conf からMySQL接続情報を読み込む。"""
     if not os.path.isfile(DATABASE_CONFIG_FILE):
         raise RuntimeError(
             f"{DATABASE_CONFIG_FILE} が見つかりません。"
@@ -622,6 +622,40 @@ def load_model():
         return config["DEFAULT"]["model"]
     except KeyError:
         return "gpt-4"
+
+
+def load_reasoning_effort():
+    """
+    Responses APIで使用するreasoning effortを取得する。
+
+    settingsテーブルの DEFAULT.reasoning_effort が存在する場合は
+    その値を使用し、未設定の場合は medium を使用する。
+    """
+    config = load_config()
+
+    try:
+        effort = str(
+            config["DEFAULT"].get(
+                "reasoning_effort",
+                "medium"
+            )
+        ).strip().lower()
+    except (KeyError, AttributeError):
+        effort = "medium"
+
+    allowed = {
+        "none",
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max",
+    }
+
+    if effort not in allowed:
+        return "medium"
+
+    return effort
 
 
 def load_openai_api_key():
@@ -1762,75 +1796,69 @@ def chat_with_openai_web_search(messages):
 
 
 def _schedule_tools():
-    """通常会話でアヴェリアに公開するスケジュール操作Tool。"""
+    """通常会話でアヴェリアに公開するResponses API用Tool。"""
     return [
         {
             "type": "function",
-            "function": {
-                "name": "add_schedule",
-                "description": (
-                    "ユーザーが指定した日時に通知する予定を登録します。"
-                    "『明日12時』『9月5日の18時』などの相対・自然言語日時は、"
-                    "system promptにある現在時刻を基準に絶対日時へ変換してください。"
-                ),
-                "strict": True,
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "title": {
-                            "type": "string",
-                            "description": "短い予定名"
-                        },
-                        "message": {
-                            "type": "string",
-                            "description": "通知時に送信する本文"
-                        },
-                        "scheduled_at": {
-                            "type": "string",
-                            "description": "YYYY-MM-DD HH:MM:SS形式の通知日時"
-                        }
+            "name": "add_schedule",
+            "description": (
+                "ユーザーが指定した日時に通知する予定を登録します。"
+                "『明日12時』『9月5日の18時』などの相対・自然言語日時は、"
+                "system promptにある現在時刻を基準に絶対日時へ変換してください。"
+            ),
+            "strict": True,
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "title": {
+                        "type": "string",
+                        "description": "短い予定名"
                     },
-                    "required": ["title", "message", "scheduled_at"],
-                    "additionalProperties": False
-                }
+                    "message": {
+                        "type": "string",
+                        "description": "通知時に送信する本文"
+                    },
+                    "scheduled_at": {
+                        "type": "string",
+                        "description": "YYYY-MM-DD HH:MM:SS形式の通知日時"
+                    }
+                },
+                "required": ["title", "message", "scheduled_at"],
+                "additionalProperties": False
             }
         },
         {
             "type": "function",
-            "function": {
-                "name": "get_schedules",
-                "description": "登録されているスケジュール予定を一覧表示するために取得します。",
-                "strict": True,
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "include_used": {
-                            "type": "boolean",
-                            "description": "trueなら通知済み予定も含める"
-                        }
-                    },
-                    "required": ["include_used"],
-                    "additionalProperties": False
-                }
+            "name": "get_schedules",
+            "description": "登録されているスケジュール予定を一覧表示するために取得します。",
+            "strict": True,
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "include_used": {
+                        "type": "boolean",
+                        "description": "trueなら通知済み予定も含める"
+                    }
+                },
+                "required": ["include_used"],
+                "additionalProperties": False
             }
         },
         {
             "type": "function",
-            "function": {
-                "name": "delete_schedule",
-                "description": "指定IDのスケジュールを削除します。",
-                "strict": True,
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "schedule_id": {
-                            "type": "integer",
-                            "description": "削除するスケジュールID"
-                        }
-                    },
-                    "required": ["schedule_id"],
-                    "additionalProperties": False
-                }
+            "name": "delete_schedule",
+            "description": "指定IDのスケジュールを削除します。",
+            "strict": True,
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "schedule_id": {
+                        "type": "integer",
+                        "description": "削除するスケジュールID"
+                    }
+                },
+                "required": ["schedule_id"],
+                "additionalProperties": False
             }
         }
     ]
@@ -1886,12 +1914,13 @@ def execute_avelia_tool(tool_name, arguments):
     raise ValueError(f"未対応のToolです: {tool_name}")
 
 
-def chat_with_openai_chat_completions(messages):
+def chat_with_openai_responses(messages):
     """
     通常会話用。
 
-    Chat Completions APIを使用し、スケジュール操作が必要な場合は
-    Function Toolを実行して結果をモデルへ返す。
+    Responses APIを使用し、reasoningとFunction Toolを同時に利用する。
+    Tool呼び出しが返された場合はローカルToolを実行し、
+    function_call_outputをprevious_response_id付きでモデルへ返す。
     """
     import json
 
@@ -1903,21 +1932,30 @@ def chat_with_openai_chat_completions(messages):
         return None
 
     model = load_model()
-    api_url = "https://api.openai.com/v1/chat/completions"
-    context_messages = list(build_context(messages))
+    api_url = "https://api.openai.com/v1/responses"
     tools = _schedule_tools()
+
+    # 最初のリクエストでは通常の会話履歴とSystem Promptを送る。
+    next_input = list(build_context(messages))
+    previous_response_id = None
 
     # Tool実行後に別のToolが必要になるケースにも対応する。
     # 暴走防止のため最大4ラウンドまで。
     for _ in range(4):
         data = {
             "model": model,
-            "messages": context_messages,
+            "input": next_input,
             "tools": tools,
             "tool_choice": "auto",
             "parallel_tool_calls": False,
-            "max_completion_tokens": load_token()
+            "reasoning": {
+                "effort": load_reasoning_effort()
+            },
+            "max_output_tokens": load_token()
         }
+
+        if previous_response_id:
+            data["previous_response_id"] = previous_response_id
 
         response = _post_openai(
             api_url,
@@ -1933,18 +1971,22 @@ def chat_with_openai_chat_completions(messages):
 
         try:
             result = response.json()
-            choices = result.get("choices", [])
+            response_id = result.get("id")
 
-            if not choices:
+            if not response_id:
                 print("")
-                print(" OpenAIから応答候補が返されませんでした。")
+                print(" OpenAI Responses APIからresponse idが返されませんでした。")
                 return None
 
-            message = choices[0].get("message", {})
-            tool_calls = message.get("tool_calls") or []
+            function_calls = [
+                item
+                for item in result.get("output", [])
+                if item.get("type") == "function_call"
+            ]
 
-            if not tool_calls:
-                content = message.get("content")
+            # Function Callが無ければ最終テキストを返す。
+            if not function_calls:
+                content = _extract_responses_text(result)
 
                 if not content:
                     print("")
@@ -1953,43 +1995,53 @@ def chat_with_openai_chat_completions(messages):
 
                 return content
 
-            # assistantのtool_callsを会話へ追加する。
-            context_messages.append({
-                "role": "assistant",
-                "content": message.get("content"),
-                "tool_calls": tool_calls,
-            })
+            tool_outputs = []
 
-            for tool_call in tool_calls:
-                tool_call_id = tool_call.get("id")
-                function = tool_call.get("function", {})
-                tool_name = function.get("name", "")
-                raw_arguments = function.get("arguments", "{}")
+            for function_call in function_calls:
+                call_id = function_call.get("call_id")
+                tool_name = function_call.get("name", "")
+                raw_arguments = function_call.get("arguments", "{}")
 
                 try:
                     arguments = json.loads(raw_arguments)
+
+                    if not isinstance(arguments, dict):
+                        raise ValueError(
+                            "Tool argumentsがJSONオブジェクトではありません。"
+                        )
+
                     tool_result = execute_avelia_tool(
                         tool_name,
                         arguments
                     )
+
                 except Exception as e:
                     tool_result = {
                         "success": False,
                         "error": f"{type(e).__name__}: {e}"
                     }
 
-                context_messages.append({
-                    "role": "tool",
-                    "tool_call_id": tool_call_id,
-                    "content": json.dumps(
+                if not call_id:
+                    print("")
+                    print(" Tool Callのcall_idがありません。")
+                    return None
+
+                tool_outputs.append({
+                    "type": "function_call_output",
+                    "call_id": call_id,
+                    "output": json.dumps(
                         tool_result,
                         ensure_ascii=False
                     )
                 })
 
+            # Responses APIの状態を引き継ぎ、Tool結果だけを次の入力にする。
+            previous_response_id = response_id
+            next_input = tool_outputs
+
         except Exception as e:
             print("")
-            print(" OpenAI Chat Completions APIの応答を解析できませんでした。")
+            print(" OpenAI Responses APIの応答を解析できませんでした。")
             print(f" {e}")
             return None
 
@@ -1997,12 +2049,13 @@ def chat_with_openai_chat_completions(messages):
     print(" Tool Callingの最大実行回数に達しました。")
     return None
 
+
 def chat_with_openai(messages):
     """
     OpenAI APIへの統合入口。
 
     通常会話:
-        Chat Completions API + DB設定モデル
+        Responses API + DB設定モデル + reasoning + Function Tool
 
     「検索して」「ネットで調べて」などを含む場合:
         Responses API + gpt-5.6-luna + Web Search
@@ -2011,7 +2064,7 @@ def chat_with_openai(messages):
     if should_use_web_search(messages):
         return chat_with_openai_web_search(messages)
 
-    return chat_with_openai_chat_completions(messages)
+    return chat_with_openai_responses(messages)
 
 
 # =========================================================
