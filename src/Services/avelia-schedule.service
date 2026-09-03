@@ -8,7 +8,7 @@ Type=simple
 
 WorkingDirectory=/opt/Anvelk-Mainframe
 
-ExecStart=ExecStart=/opt/Anvelk-Mainframe/.venv/bin/python /opt/Anvelk-Mainframe/schedule_worker.py
+ExecStart=/opt/Anvelk-Mainframe/.venv/bin/python /opt/Anvelk-Mainframe/schedule_worker.py
 
 Restart=always
 RestartSec=5

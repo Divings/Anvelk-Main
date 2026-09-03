@@ -9,7 +9,7 @@ import mysql.connector
 import requests
 
 
-DATABASE_CONF = "/opt/config/database.conf"
+DATABASE_CONF = "/opt/Anvelk-Mainframe/config/database.conf"
 CHECK_INTERVAL = 30
 
 
