@@ -12,6 +12,7 @@ import shutil
 import pyfiglet
 import traceback
 import time
+from pack.read_file import read_local_file
 from pack.sessions import (
     Create_session,
     End_session,
@@ -1625,6 +1626,7 @@ def should_use_web_search(messages):
     search_keywords = [
         "検索して",
         "検索してみて",
+        "について調べて",
         "web検索",
         "Web検索",
         "WEB検索",
@@ -1799,6 +1801,27 @@ def _schedule_tools():
     """通常会話でアヴェリアに公開するResponses API用Tool。"""
     return [
         {
+    "type": "function",
+    "name": "read_file",
+    "description": (
+        "ユーザーが指定したLinuxサーバー上のテキストファイルを読み込みます。"
+        "ログ、設定ファイル、ソースコードなどの内容確認に使用します。"
+        "ファイルの書き込みやプログラム実行は行いません。"
+    ),
+    "strict": True,
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "path": {
+                "type": "string",
+                "description": "読み込むファイルのパス"
+            }
+        },
+        "required": ["path"],
+        "additionalProperties": False
+    }
+},
+        {
             "type": "function",
             "name": "add_schedule",
             "description": (
@@ -1878,9 +1901,10 @@ def _json_safe_schedule_rows(rows):
 
     return result
 
-
 def execute_avelia_tool(tool_name, arguments):
     """OpenAIから要求されたローカルToolを実行する。"""
+    if tool_name == "read_file":
+        return read_local_file(arguments["path"])
     if tool_name == "add_schedule":
         schedule_id = add_schedule(
             arguments["title"],
