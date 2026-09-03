@@ -1,0 +1,19 @@
+[Unit]
+Description=Avelia Schedule Notification Service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+
+WorkingDirectory=/opt/Anvelk-Mainframe
+
+ExecStart=/usr/bin/python3 /opt/Anvelk-Mainframe/schedule_worker.py
+
+Restart=always
+RestartSec=5
+
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target

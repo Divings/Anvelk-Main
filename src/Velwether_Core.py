@@ -70,7 +70,7 @@ sys.stderr.reconfigure(
 # =========================================================
 # MySQL 設定
 # =========================================================
-# DB接続情報は config/database.conf から取得する。
+# DB接続情報は /opt/config/database.conf から取得する。
 #
 # [DATABASE]
 # host = localhost
@@ -78,13 +78,13 @@ sys.stderr.reconfigure(
 # user = Dail
 # password = xxxxxxxx
 # database = dail
-DATABASE_CONFIG_FILE = os.path.join("config", "database.conf")
+DATABASE_CONFIG_FILE = "/opt/config/database.conf"
 
 
 
 
 def load_database_config():
-    """config/database.conf からMySQL接続情報を読み込む。"""
+    """/opt/config/database.conf からMySQL接続情報を読み込む。"""
     if not os.path.isfile(DATABASE_CONFIG_FILE):
         raise RuntimeError(
             f"{DATABASE_CONFIG_FILE} が見つかりません。"
@@ -136,6 +136,158 @@ def get_db_connection():
     db_config = load_database_config()
 
     return mysql.connector.connect(**db_config)
+
+
+# =========================================================
+# スケジュール管理
+# =========================================================
+
+def init_schedule_table():
+    """schedulesテーブルが存在しない場合は作成する。"""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+
+    try:
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS schedules (
+                id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+                title VARCHAR(255) NOT NULL,
+                message TEXT NOT NULL,
+                scheduled_at DATETIME NOT NULL,
+                message_use TINYINT(1) NOT NULL DEFAULT 0,
+                created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (id),
+                INDEX idx_schedule_due (message_use, scheduled_at)
+            ) ENGINE=InnoDB
+              DEFAULT CHARSET=utf8mb4
+              COLLATE=utf8mb4_unicode_ci
+            """
+        )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        cursor.close()
+        conn.close()
+
+
+def _normalize_schedule_datetime(scheduled_at):
+    """スケジュール日時をdatetimeへ正規化する。"""
+    from datetime import datetime
+
+    if isinstance(scheduled_at, datetime):
+        return scheduled_at
+
+    if not isinstance(scheduled_at, str):
+        raise ValueError("scheduled_at は日時文字列で指定してください。")
+
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M"):
+        try:
+            return datetime.strptime(scheduled_at.strip(), fmt)
+        except ValueError:
+            pass
+
+    raise ValueError(
+        "日時形式が不正です。YYYY-MM-DD HH:MM または "
+        "YYYY-MM-DD HH:MM:SS を使用してください。"
+    )
+
+
+def add_schedule(title, message, scheduled_at):
+    """新しい通知予定を登録し、登録IDを返す。"""
+    title = str(title).strip()
+    message = str(message).strip()
+    scheduled_at = _normalize_schedule_datetime(scheduled_at)
+
+    if not title:
+        raise ValueError("スケジュールタイトルが空です。")
+    if not message:
+        raise ValueError("通知メッセージが空です。")
+
+    conn = get_db_connection()
+    cursor = conn.cursor()
+
+    try:
+        cursor.execute(
+            """
+            INSERT INTO schedules
+                (title, message, scheduled_at, message_use)
+            VALUES
+                (%s, %s, %s, 0)
+            """,
+            (title, message, scheduled_at),
+        )
+        schedule_id = cursor.lastrowid
+        conn.commit()
+        return schedule_id
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        cursor.close()
+        conn.close()
+
+
+def get_schedules(include_used=False):
+    """予定一覧を取得する。include_used=Falseなら未通知のみ。"""
+    conn = get_db_connection()
+    cursor = conn.cursor(dictionary=True)
+
+    try:
+        if include_used:
+            cursor.execute(
+                """
+                SELECT id, title, message, scheduled_at,
+                       message_use, created_at
+                FROM schedules
+                ORDER BY scheduled_at ASC, id ASC
+                """
+            )
+        else:
+            cursor.execute(
+                """
+                SELECT id, title, message, scheduled_at,
+                       message_use, created_at
+                FROM schedules
+                WHERE message_use = 0
+                ORDER BY scheduled_at ASC, id ASC
+                """
+            )
+        return cursor.fetchall()
+    finally:
+        cursor.close()
+        conn.close()
+
+
+def delete_schedule(schedule_id):
+    """IDを指定して予定を削除する。存在した場合True。"""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+
+    try:
+        cursor.execute(
+            "DELETE FROM schedules WHERE id = %s",
+            (int(schedule_id),),
+        )
+        deleted = cursor.rowcount > 0
+        conn.commit()
+        return deleted
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        cursor.close()
+        conn.close()
+
+
+try:
+    init_schedule_table()
+except Exception as e:
+    print("")
+    print(" Schedule Databaseを初期化できませんでした。")
+    print(f" {e}")
 
 
 def load_settings_from_db(section_name):
@@ -1609,13 +1761,139 @@ def chat_with_openai_web_search(messages):
         return None
 
 
+def _schedule_tools():
+    """通常会話でアヴェリアに公開するスケジュール操作Tool。"""
+    return [
+        {
+            "type": "function",
+            "function": {
+                "name": "add_schedule",
+                "description": (
+                    "ユーザーが指定した日時に通知する予定を登録します。"
+                    "『明日12時』『9月5日の18時』などの相対・自然言語日時は、"
+                    "system promptにある現在時刻を基準に絶対日時へ変換してください。"
+                ),
+                "strict": True,
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "title": {
+                            "type": "string",
+                            "description": "短い予定名"
+                        },
+                        "message": {
+                            "type": "string",
+                            "description": "通知時に送信する本文"
+                        },
+                        "scheduled_at": {
+                            "type": "string",
+                            "description": "YYYY-MM-DD HH:MM:SS形式の通知日時"
+                        }
+                    },
+                    "required": ["title", "message", "scheduled_at"],
+                    "additionalProperties": False
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "get_schedules",
+                "description": "登録されているスケジュール予定を一覧表示するために取得します。",
+                "strict": True,
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "include_used": {
+                            "type": "boolean",
+                            "description": "trueなら通知済み予定も含める"
+                        }
+                    },
+                    "required": ["include_used"],
+                    "additionalProperties": False
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "delete_schedule",
+                "description": "指定IDのスケジュールを削除します。",
+                "strict": True,
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "schedule_id": {
+                            "type": "integer",
+                            "description": "削除するスケジュールID"
+                        }
+                    },
+                    "required": ["schedule_id"],
+                    "additionalProperties": False
+                }
+            }
+        }
+    ]
+
+
+def _json_safe_schedule_rows(rows):
+    """DB取得結果をTool応答用JSONへ変換する。"""
+    result = []
+
+    for row in rows:
+        item = dict(row)
+        for key in ("scheduled_at", "created_at"):
+            value = item.get(key)
+            if value is not None and hasattr(value, "strftime"):
+                item[key] = value.strftime("%Y-%m-%d %H:%M:%S")
+        result.append(item)
+
+    return result
+
+
+def execute_avelia_tool(tool_name, arguments):
+    """OpenAIから要求されたローカルToolを実行する。"""
+    if tool_name == "add_schedule":
+        schedule_id = add_schedule(
+            arguments["title"],
+            arguments["message"],
+            arguments["scheduled_at"],
+        )
+        return {
+            "success": True,
+            "schedule_id": schedule_id,
+            "title": arguments["title"],
+            "scheduled_at": arguments["scheduled_at"],
+        }
+
+    if tool_name == "get_schedules":
+        rows = get_schedules(
+            include_used=bool(arguments["include_used"])
+        )
+        return {
+            "success": True,
+            "schedules": _json_safe_schedule_rows(rows),
+        }
+
+    if tool_name == "delete_schedule":
+        deleted = delete_schedule(arguments["schedule_id"])
+        return {
+            "success": deleted,
+            "schedule_id": arguments["schedule_id"],
+            "deleted": deleted,
+        }
+
+    raise ValueError(f"未対応のToolです: {tool_name}")
+
+
 def chat_with_openai_chat_completions(messages):
     """
     通常会話用。
 
-    従来通り Chat Completions APIを使い、
-    DBの DEFAULT.model に設定されたモデルを使用する。
+    Chat Completions APIを使用し、スケジュール操作が必要な場合は
+    Function Toolを実行して結果をモデルへ返す。
     """
+    import json
 
     api_key = load_openai_api_key()
 
@@ -1626,52 +1904,98 @@ def chat_with_openai_chat_completions(messages):
 
     model = load_model()
     api_url = "https://api.openai.com/v1/chat/completions"
-    context_messages = build_context(messages)
+    context_messages = list(build_context(messages))
+    tools = _schedule_tools()
 
-    data = {
-        "model": model,
-        "messages": context_messages,
-        "max_completion_tokens": load_token()
-        # "temperature": 0.8
-    }
+    # Tool実行後に別のToolが必要になるケースにも対応する。
+    # 暴走防止のため最大4ラウンドまで。
+    for _ in range(4):
+        data = {
+            "model": model,
+            "messages": context_messages,
+            "tools": tools,
+            "tool_choice": "auto",
+            "parallel_tool_calls": False,
+            "max_completion_tokens": load_token()
+        }
 
-    response = _post_openai(
-        api_url,
-        _openai_headers(api_key),
-        data
-    )
+        response = _post_openai(
+            api_url,
+            _openai_headers(api_key),
+            data
+        )
 
-    if response is None:
-        return None
-
-    if response.status_code != 200:
-        return _handle_openai_http_error(response)
-
-    try:
-        result = response.json()
-        choices = result.get("choices", [])
-
-        if not choices:
-            print("")
-            print(" OpenAIから応答候補が返されませんでした。")
+        if response is None:
             return None
 
-        message = choices[0].get("message", {})
-        content = message.get("content")
+        if response.status_code != 200:
+            return _handle_openai_http_error(response)
 
-        if not content:
+        try:
+            result = response.json()
+            choices = result.get("choices", [])
+
+            if not choices:
+                print("")
+                print(" OpenAIから応答候補が返されませんでした。")
+                return None
+
+            message = choices[0].get("message", {})
+            tool_calls = message.get("tool_calls") or []
+
+            if not tool_calls:
+                content = message.get("content")
+
+                if not content:
+                    print("")
+                    print(" OpenAIからテキスト応答が返されませんでした。")
+                    return None
+
+                return content
+
+            # assistantのtool_callsを会話へ追加する。
+            context_messages.append({
+                "role": "assistant",
+                "content": message.get("content"),
+                "tool_calls": tool_calls,
+            })
+
+            for tool_call in tool_calls:
+                tool_call_id = tool_call.get("id")
+                function = tool_call.get("function", {})
+                tool_name = function.get("name", "")
+                raw_arguments = function.get("arguments", "{}")
+
+                try:
+                    arguments = json.loads(raw_arguments)
+                    tool_result = execute_avelia_tool(
+                        tool_name,
+                        arguments
+                    )
+                except Exception as e:
+                    tool_result = {
+                        "success": False,
+                        "error": f"{type(e).__name__}: {e}"
+                    }
+
+                context_messages.append({
+                    "role": "tool",
+                    "tool_call_id": tool_call_id,
+                    "content": json.dumps(
+                        tool_result,
+                        ensure_ascii=False
+                    )
+                })
+
+        except Exception as e:
             print("")
-            print(" OpenAIからテキスト応答が返されませんでした。")
+            print(" OpenAI Chat Completions APIの応答を解析できませんでした。")
+            print(f" {e}")
             return None
 
-        return content
-
-    except Exception as e:
-        print("")
-        print(" OpenAI Chat Completions APIの応答を解析できませんでした。")
-        print(f" {e}")
-        return None
-
+    print("")
+    print(" Tool Callingの最大実行回数に達しました。")
+    return None
 
 def chat_with_openai(messages):
     """
