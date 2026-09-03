@@ -12,6 +12,7 @@ import shutil
 import pyfiglet
 import traceback
 import time
+from pack.run_System import run_system_command,block_cmd
 from pack.read_file import read_local_file
 from pack.sessions import (
     Create_session,
@@ -1802,6 +1803,43 @@ def _schedule_tools():
     return [
         {
     "type": "function",
+    "name": "run_system",
+    "description": (
+        "Linuxサーバー上でシェルコマンドを実行します。"
+        "ユーザーが現在のメッセージで明示的にコマンド実行を依頼した場合のみ使用してください。"
+        "単なる質問、コマンド例の作成、説明、確認では使用しないでください。"
+        "「実行したらどうなる？」などの質問の場合は使用しないでください。"
+        "実行にはタイムアウトと出力サイズ制限があります。"
+        "また、実行結果はユーザーに返すため、機密情報やパスワードなどを含むコマンドは使用しないでください。"
+        "一部コマンドは実行制限がかかっています。"
+    ),
+    "strict": True,
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "command": {
+                "type": "string",
+                "description": "実行するLinuxシェルコマンド"
+            },
+            "timeout": {
+                "type": "integer",
+                "description": "コマンド実行のタイムアウト秒数。通常は30秒"
+            },
+            "max_output": {
+                "type": "integer",
+                "description": "取得する最大出力サイズ。通常は65536バイト"
+            }
+        },
+        "required": [
+            "command",
+            "timeout",
+            "max_output"
+        ],
+        "additionalProperties": False
+    }
+},
+        {
+    "type": "function",
     "name": "read_file",
     "description": (
         "ユーザーが指定したLinuxサーバー上のテキストファイルを読み込みます。"
@@ -1886,7 +1924,6 @@ def _schedule_tools():
         }
     ]
 
-
 def _json_safe_schedule_rows(rows):
     """DB取得結果をTool応答用JSONへ変換する。"""
     result = []
@@ -1905,6 +1942,19 @@ def execute_avelia_tool(tool_name, arguments):
     """OpenAIから要求されたローカルToolを実行する。"""
     if tool_name == "read_file":
         return read_local_file(arguments["path"])
+
+    if tool_name == "run_system":
+        if block_cmd(arguments["command"]):
+            return {
+                "success": False,
+                "error": "blocked_command"
+            }
+        return run_system_command(
+            command=arguments["command"],
+            timeout=arguments["timeout"],
+            max_output=arguments["max_output"]
+        )
+
     if tool_name == "add_schedule":
         schedule_id = add_schedule(
             arguments["title"],
