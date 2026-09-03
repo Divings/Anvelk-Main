@@ -322,7 +322,7 @@ APP_DATA=get_appdata_dir()
 CONFIG_DIR = "config"
 from pathlib import Path
 
-DATA_DIR = Path.home() / ".local" / "share" / "Dail"
+DATA_DIR = Path.home() / ".local" / "share" / "Avelia"
 LOG_DIR ="logs"
 
 MEMORY_KEY_FILE = os.path.join(
@@ -1793,7 +1793,7 @@ def main():
         time.sleep(2)
         os.system("clear")
         try:
-            print(pyfiglet.figlet_format("Velwether",font="slant"))
+            print(pyfiglet.figlet_format("Avelia",font="slant"))
             print("OpenAI API Hybrid Web Search Edition")
             if DVD_MODE == 1:
                 print("For DVD Mode")
