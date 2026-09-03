@@ -78,7 +78,7 @@ sys.stderr.reconfigure(
 # user = Dail
 # password = xxxxxxxx
 # database = dail
-DATABASE_CONFIG_FILE = "/opt/config/database.conf"
+DATABASE_CONFIG_FILE = "/opt/Anvelk-Mainframe/database.conf"
 
 
 
