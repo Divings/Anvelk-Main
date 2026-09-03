@@ -537,6 +537,8 @@ else:
     SYSTEM_PROMPT_FILE = os.path.join(APP_DATA, "Sys_Prompt.txt")
 
 MEMORY_HASH_FILE = CHAT_LOG_FILE + ".sha256"
+EXEC_CONF_FILE = DATA_DIR / "exec_conf.ini"
+
 
 MAX_MEMORY = load_memory_conf()
 pre_clear = load_pre_clear()
@@ -547,6 +549,19 @@ if DVD_MODE==0:
     os.makedirs(LOG_DIR, exist_ok=True)
 
 os.makedirs(DATA_DIR, exist_ok=True)
+if not EXEC_CONF_FILE.exists():
+    config = configparser.ConfigParser()
+
+    config["EXEC"] = {
+        "enabled": "0"
+    }
+
+    with open(
+        EXEC_CONF_FILE,
+        "w",
+        encoding="utf-8"
+    ) as f:
+        config.write(f)
 if not os.path.isfile(DATA_DIR / "Sys_Prompt.txt"):
 
     shutil.copyfile(
@@ -591,6 +606,33 @@ except Exception as e:
 # =========================================================
 # 設定ファイル読み込み
 # =========================================================
+
+def load_exec_conf():
+    """
+    システムコマンド実行機能の有効・無効を取得する。
+
+    [EXEC]
+    enabled = 0  無効
+    enabled = 1  有効
+    """
+
+    config = configparser.ConfigParser()
+
+    try:
+        config.read(
+            EXEC_CONF_FILE,
+            encoding="utf-8"
+        )
+
+        return config.getint(
+            "EXEC",
+            "enabled",
+            fallback=0
+        )
+
+    except (ValueError, configparser.Error):
+        return 0
+
 
 def load_voice():
     """
@@ -1944,6 +1986,11 @@ def execute_avelia_tool(tool_name, arguments):
         return read_local_file(arguments["path"])
 
     if tool_name == "run_system":
+        if load_exec_conf() != 1:
+            return {
+                "success": False,
+                "error": "system_execution_disabled"
+            }
         if block_cmd(arguments["command"]):
             return {
                 "success": False,
