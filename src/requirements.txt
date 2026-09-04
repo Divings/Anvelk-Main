@@ -5,3 +5,4 @@ cryptography
 dropbox
 pyttsx3
 python-dotenv
+mariadb
