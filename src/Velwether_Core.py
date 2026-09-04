@@ -14,6 +14,7 @@ import traceback
 import time
 from pack.run_System import run_system_command,block_cmd
 from pack.read_file import read_local_file
+from pack.slack_notify import notify_slack
 from pack.sessions import (
     Create_session,
     End_session,
@@ -1845,6 +1846,32 @@ def _schedule_tools():
     return [
         {
     "type": "function",
+    "name": "send_slack_notification",
+    "description": (
+        "Slackへ通知メッセージを送信します。"
+        "ユーザーが明示的にSlackへの通知を依頼した場合、"
+        "またはユーザーが依頼した作業の完了・失敗をSlackへ通知するよう"
+        "明示した場合に使用してください。"
+        "単なる会話内容を勝手に通知してはいけません。"
+        "通知に失敗した場合には、内部的にFalseが返されますが、ユーザーには通知失敗の旨を伝えてください。"
+    ),
+    "strict": True,
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "message": {
+                "type": "string",
+                "description": "Slackへ送信する通知本文"
+            }
+        },
+        "required": [
+            "message"
+        ],
+        "additionalProperties": False
+    }
+},
+        {
+    "type": "function",
     "name": "run_system",
     "description": (
         "Linuxサーバー上でシェルコマンドを実行します。"
@@ -1982,6 +2009,16 @@ def _json_safe_schedule_rows(rows):
 
 def execute_avelia_tool(tool_name, arguments):
     """OpenAIから要求されたローカルToolを実行する。"""
+    if tool_name == "send_slack_notification":
+        response = notify_slack(
+            arguments["message"],
+            mode="tool"
+        )
+
+        return {
+            "success": response,
+            "message": arguments["message"]
+        }
     if tool_name == "read_file":
         return read_local_file(arguments["path"])
 
