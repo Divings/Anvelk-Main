@@ -15,6 +15,7 @@ import time
 from pack.run_System import run_system_command,block_cmd
 from pack.read_file import read_local_file
 from pack.slack_notify import notify_slack
+from pack.write_file import write_local_file
 from pack.sessions import (
     Create_session,
     End_session,
@@ -1859,8 +1860,7 @@ def _schedule_tools():
     "description": (
         "Slackへ通知メッセージを送信します。"
         "ユーザーが明示的にSlackへの通知を依頼した場合、"
-        "またはユーザーが依頼した作業の完了・失敗をSlackへ通知するよう"
-        "明示した場合に使用してください。"
+        "またはユーザーが依頼した作業の完了・失敗をSlackへ通知するよう明示した場合に使用してください。"
         "単なる会話内容を勝手に通知してはいけません。"
         "通知に失敗した場合には、内部的にFalseが返されますが、ユーザーには通知失敗の旨を伝えてください。"
     ),
@@ -1886,7 +1886,7 @@ def _schedule_tools():
         "Linuxサーバー上でシェルコマンドを実行します。"
         "ユーザーが現在のメッセージで明示的にコマンド実行を依頼した場合のみ使用してください。"
         "単なる質問、コマンド例の作成、説明、確認では使用しないでください。"
-        "「実行したらどうなる？」などの質問の場合は使用しないでください。"
+        "「実行したらどうなる？」などの質問の場合は(実行例として実行した場合はそれを明記して)使用しないでください。"
         "実行にはタイムアウトと出力サイズ制限があります。"
         "また、実行結果はユーザーに返すため、機密情報やパスワードなどを含むコマンドは使用しないでください。"
         "一部コマンドは実行制限がかかっています。"
@@ -1934,6 +1934,46 @@ def _schedule_tools():
             }
         },
         "required": ["path"],
+        "additionalProperties": False
+    }
+},{
+    "type": "function",
+    "name": "write_file",
+    "description": (
+        "Linuxサーバー上のホームディレクトリ配下へ"
+        "UTF-8テキストファイルを書き込みます。"
+        "ユーザーが明示的にファイル作成または変更を依頼した場合のみ使用してください。"
+        "ホームディレクトリ配下以外には書き込めません。"
+        "既存ファイルを上書きする場合は overwrite=true を指定してください。"
+    ),
+    "strict": True,
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "path": {
+                "type": "string",
+                "description": (
+                    "書き込み先ファイルパス。"
+                    "ホームディレクトリ配下のみ使用可能です。"
+                )
+            },
+            "content": {
+                "type": "string",
+                "description": "ファイルへ書き込むUTF-8テキスト内容"
+            },
+            "overwrite": {
+                "type": "boolean",
+                "description": (
+                    "既存ファイルを上書きする場合はtrue。"
+                    "新規作成または上書きしない場合はfalse"
+                )
+            }
+        },
+        "required": [
+            "path",
+            "content",
+            "overwrite"
+        ],
         "additionalProperties": False
     }
 },
@@ -2018,6 +2058,12 @@ def _json_safe_schedule_rows(rows):
 
 def execute_avelia_tool(tool_name, arguments):
     """OpenAIから要求されたローカルToolを実行する。"""
+    if tool_name == "write_file":
+        return write_local_file(
+            arguments["path"],
+            arguments["content"],
+            arguments["overwrite"]
+        )
     if tool_name == "send_slack_notification":
         response = notify_slack(
             arguments["message"],
