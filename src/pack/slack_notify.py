@@ -4,11 +4,9 @@ import os
 import time
 import hashlib
 import configparser
-from datetime import datetime
 from pathlib import Path
-from typing import Optional
 
-import mariadb
+import mysql.connector
 import requests
 from dotenv import load_dotenv
 
@@ -150,24 +148,24 @@ def load_database_config(
 
 def get_database_connection():
     """
-    Anvelk Mainframe のMariaDBへ接続する。
+    mysql.connector を使って Anvelk Mainframe のMariaDBへ接続する。
     """
 
     config = load_database_config()
 
     try:
-        connection = mariadb.connect(
+        connection = mysql.connector.connect(
             host=config["host"],
             port=config["port"],
             user=config["user"],
             password=config["password"],
-            database=config["database"],
-            autocommit=True
+            database=config["database"]
         )
 
+        connection.autocommit = True
         return connection
 
-    except mariadb.Error as e:
+    except mysql.connector.Error as e:
         raise RuntimeError(
             f"データベース接続に失敗しました: {e}"
         ) from e
@@ -200,8 +198,8 @@ def get_setting(
             """
             SELECT setting_value
             FROM settings
-            WHERE section_name = ?
-              AND setting_key = ?
+            WHERE section_name = %s
+              AND setting_key = %s
             LIMIT 1
             """,
             (
@@ -312,10 +310,6 @@ def get_debug_mode() -> bool:
 _last_notify_times = {}
 
 msg_history = None
-
-values = 0
-
-
 # ============================================================
 # ログディレクトリ
 # ============================================================
@@ -612,8 +606,6 @@ def notify_slack(
     mode が指定された場合は
     重複通知抑止を無効化。
     """
-
-    global values
     global msg_history
 
     # API連続アクセス対策
@@ -667,17 +659,10 @@ def notify_slack(
 
         # 通知成功後にハッシュ保存
         msg_history = message_hash
-
-        values = 0
         return True
     except Exception as e:
-
-        if values == 0:
-            print(
-                f"[通知例外] {e}"
-            )
+        print(f"[通知例外] {e}")
         return False
-        values = 1
 
 
 # ============================================================
