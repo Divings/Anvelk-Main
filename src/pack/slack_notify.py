@@ -84,7 +84,8 @@ def load_database_config(
         "database",
         "DB",
         "mysql",
-        "mariadb"
+        "mariadb",
+        "DATABASE"
     ):
         if config.has_section(candidate):
             section_name = candidate
