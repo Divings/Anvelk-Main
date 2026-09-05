@@ -34,8 +34,17 @@ from pack.knowledge import (
     init_knowledge_table,
     get_knowledge_context
 )
+from pack.Auth import authorize_environment
 
 import uuid
+
+result = authorize_environment()
+if not result["ok"]:
+    reason = result["reason"]
+
+    notify_slack("実行停止: 実行環境が許可されていません: " + str(reason))
+    print("実行環境が許可されていません: " + str(reason))
+    sys.exit()
 
 # UUID生成
 process_uuid = str(uuid.uuid4())
