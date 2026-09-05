@@ -7,8 +7,20 @@ import configparser
 import pwd
 import mysql.connector
 
+# アヴェリア用のセキュリティコード
+# 改変された場合も、アヴェリアのアップデート時に上書きされるので、セキュリティ上の問題はない。
+# ライブラリが書き換えられたら、アップデートによる上書き対象ではないため、セキュリティ上の問題がある。
+# が、そうしないとテスト環境でのテストができないので、仕方ない。
+
 DATABASE_CONF = "/opt/Anvelk-Mainframe/config/database.conf"
 
+def check_library_exists():
+    if not os.path.exists("/usr/lib64/libanv_core.so"):
+        raise RuntimeError(
+            "libanv_core.so が見つかりません。"
+        )
+
+check_library_exists()
 
 def load_database_config():
     config = configparser.ConfigParser()

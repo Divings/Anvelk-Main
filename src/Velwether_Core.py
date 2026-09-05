@@ -302,6 +302,1165 @@ except Exception as e:
     print(" Schedule Databaseを初期化できませんでした。")
     print(f" {e}")
 
+# =========================================================
+# 通常予定管理
+# =========================================================
+
+def init_calendar_tables():
+    """
+    通知なしの通常予定を管理するテーブルを作成する。
+
+    calendar_once
+        単発予定
+
+    calendar_weekly
+        曜日条件付き予定本体
+
+    calendar_weekly_days
+        定期予定の曜日
+
+    calendar_weekly_status
+        定期予定の日ごとの完了状態
+    """
+
+    sql_list = [
+        """
+        CREATE TABLE IF NOT EXISTS calendar_once (
+            id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+
+            title VARCHAR(255) NOT NULL,
+            description TEXT NULL,
+
+            scheduled_date DATE NOT NULL,
+
+            start_time TIME NULL,
+            end_time TIME NULL,
+
+            completed TINYINT(1) NOT NULL DEFAULT 0,
+            completed_at DATETIME NULL,
+
+            source VARCHAR(32) NOT NULL DEFAULT 'manual',
+
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+            updated_at DATETIME NOT NULL
+                DEFAULT CURRENT_TIMESTAMP
+                ON UPDATE CURRENT_TIMESTAMP,
+
+            PRIMARY KEY (id),
+
+            INDEX idx_calendar_once_date (
+                scheduled_date,
+                completed
+            )
+
+        ) ENGINE=InnoDB
+          DEFAULT CHARSET=utf8mb4
+          COLLATE=utf8mb4_unicode_ci
+        """,
+
+        """
+        CREATE TABLE IF NOT EXISTS calendar_weekly (
+            id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+
+            title VARCHAR(255) NOT NULL,
+            description TEXT NULL,
+
+            start_time TIME NULL,
+            end_time TIME NULL,
+
+            enabled TINYINT(1) NOT NULL DEFAULT 1,
+
+            source VARCHAR(32) NOT NULL DEFAULT 'manual',
+
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+            updated_at DATETIME NOT NULL
+                DEFAULT CURRENT_TIMESTAMP
+                ON UPDATE CURRENT_TIMESTAMP,
+
+            PRIMARY KEY (id)
+
+        ) ENGINE=InnoDB
+          DEFAULT CHARSET=utf8mb4
+          COLLATE=utf8mb4_unicode_ci
+        """,
+
+        """
+        CREATE TABLE IF NOT EXISTS calendar_weekly_days (
+            id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+
+            schedule_id BIGINT UNSIGNED NOT NULL,
+
+            weekday TINYINT UNSIGNED NOT NULL,
+
+            PRIMARY KEY (id),
+
+            UNIQUE KEY uq_calendar_weekly_day (
+                schedule_id,
+                weekday
+            ),
+
+            INDEX idx_calendar_weekday (
+                weekday
+            ),
+
+            CONSTRAINT fk_calendar_weekly_days
+                FOREIGN KEY (schedule_id)
+                REFERENCES calendar_weekly(id)
+                ON DELETE CASCADE
+
+        ) ENGINE=InnoDB
+          DEFAULT CHARSET=utf8mb4
+          COLLATE=utf8mb4_unicode_ci
+        """,
+
+        """
+        CREATE TABLE IF NOT EXISTS calendar_weekly_status (
+            id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+
+            schedule_id BIGINT UNSIGNED NOT NULL,
+
+            scheduled_date DATE NOT NULL,
+
+            completed TINYINT(1) NOT NULL DEFAULT 0,
+
+            completed_at DATETIME NULL,
+
+            PRIMARY KEY (id),
+
+            UNIQUE KEY uq_calendar_weekly_status (
+                schedule_id,
+                scheduled_date
+            ),
+
+            INDEX idx_calendar_weekly_status_date (
+                scheduled_date,
+                completed
+            ),
+
+            CONSTRAINT fk_calendar_weekly_status
+                FOREIGN KEY (schedule_id)
+                REFERENCES calendar_weekly(id)
+                ON DELETE CASCADE
+
+        ) ENGINE=InnoDB
+          DEFAULT CHARSET=utf8mb4
+          COLLATE=utf8mb4_unicode_ci
+        """
+    ]
+
+    conn = get_db_connection()
+    cursor = conn.cursor()
+
+    try:
+
+        for sql in sql_list:
+            cursor.execute(sql)
+
+        conn.commit()
+
+    except Exception:
+
+        conn.rollback()
+        raise
+
+    finally:
+
+        cursor.close()
+        conn.close()
+
+
+def _normalize_calendar_date(value):
+
+    from datetime import date, datetime
+
+    if isinstance(value, datetime):
+        return value.date()
+
+    if isinstance(value, date):
+        return value
+
+    if not isinstance(value, str):
+        raise ValueError(
+            "日付はYYYY-MM-DD形式で指定してください。"
+        )
+
+    try:
+
+        return datetime.strptime(
+            value.strip(),
+            "%Y-%m-%d"
+        ).date()
+
+    except ValueError as e:
+
+        raise ValueError(
+            "日付形式が不正です。YYYY-MM-DDを使用してください。"
+        ) from e
+
+
+def _normalize_calendar_time(value):
+
+    from datetime import (
+        time as dt_time,
+        datetime
+    )
+
+    if value is None or value == "":
+        return None
+
+    if isinstance(value, dt_time):
+        return value
+
+    if not isinstance(value, str):
+
+        raise ValueError(
+            "時刻はHH:MMまたはHH:MM:SS形式で指定してください。"
+        )
+
+    value = value.strip()
+
+    if not value:
+        return None
+
+    for fmt in (
+        "%H:%M:%S",
+        "%H:%M"
+    ):
+
+        try:
+
+            return datetime.strptime(
+                value,
+                fmt
+            ).time()
+
+        except ValueError:
+            pass
+
+    raise ValueError(
+        "時刻形式が不正です。"
+        "HH:MMまたはHH:MM:SSを使用してください。"
+    )
+
+
+def _validate_calendar_title(title):
+
+    title = str(title).strip()
+
+    if not title:
+        raise ValueError(
+            "予定タイトルが空です。"
+        )
+
+    return title
+
+
+def _validate_calendar_time_range(
+    start_time,
+    end_time
+):
+
+    start_time = _normalize_calendar_time(
+        start_time
+    )
+
+    end_time = _normalize_calendar_time(
+        end_time
+    )
+
+    if (
+        start_time is not None
+        and end_time is not None
+        and end_time < start_time
+    ):
+
+        raise ValueError(
+            "end_timeはstart_time以降にしてください。"
+        )
+
+    return start_time, end_time
+
+
+def add_calendar_once(
+    title,
+    scheduled_date,
+    start_time=None,
+    end_time=None,
+    description=None,
+    source="avelia"
+):
+
+    title = _validate_calendar_title(
+        title
+    )
+
+    scheduled_date = _normalize_calendar_date(
+        scheduled_date
+    )
+
+    start_time, end_time = (
+        _validate_calendar_time_range(
+            start_time,
+            end_time
+        )
+    )
+
+    if description is not None:
+
+        description = (
+            str(description).strip()
+            or None
+        )
+
+    conn = get_db_connection()
+    cursor = conn.cursor()
+
+    try:
+
+        cursor.execute(
+            """
+            INSERT INTO calendar_once
+            (
+                title,
+                description,
+                scheduled_date,
+                start_time,
+                end_time,
+                source
+            )
+            VALUES
+            (
+                %s,
+                %s,
+                %s,
+                %s,
+                %s,
+                %s
+            )
+            """,
+            (
+                title,
+                description,
+                scheduled_date,
+                start_time,
+                end_time,
+                source
+            )
+        )
+
+        schedule_id = (
+            cursor.lastrowid
+        )
+
+        conn.commit()
+
+        return schedule_id
+
+    except Exception:
+
+        conn.rollback()
+        raise
+
+    finally:
+
+        cursor.close()
+        conn.close()
+
+
+def add_calendar_weekly(
+    title,
+    weekdays,
+    start_time=None,
+    end_time=None,
+    description=None,
+    source="avelia"
+):
+
+    title = _validate_calendar_title(
+        title
+    )
+
+    if not isinstance(
+        weekdays,
+        (list, tuple, set)
+    ):
+
+        raise ValueError(
+            "weekdaysは配列で指定してください。"
+        )
+
+    weekdays = sorted(
+        {
+            int(day)
+            for day in weekdays
+        }
+    )
+
+    if not weekdays:
+
+        raise ValueError(
+            "曜日が指定されていません。"
+        )
+
+    for day in weekdays:
+
+        if day < 0 or day > 6:
+
+            raise ValueError(
+                "曜日番号は0〜6です。"
+            )
+
+    start_time, end_time = (
+        _validate_calendar_time_range(
+            start_time,
+            end_time
+        )
+    )
+
+    if description is not None:
+
+        description = (
+            str(description).strip()
+            or None
+        )
+
+    conn = get_db_connection()
+    cursor = conn.cursor()
+
+    try:
+
+        cursor.execute(
+            """
+            INSERT INTO calendar_weekly
+            (
+                title,
+                description,
+                start_time,
+                end_time,
+                enabled,
+                source
+            )
+            VALUES
+            (
+                %s,
+                %s,
+                %s,
+                %s,
+                1,
+                %s
+            )
+            """,
+            (
+                title,
+                description,
+                start_time,
+                end_time,
+                source
+            )
+        )
+
+        schedule_id = (
+            cursor.lastrowid
+        )
+
+        cursor.executemany(
+            """
+            INSERT INTO calendar_weekly_days
+            (
+                schedule_id,
+                weekday
+            )
+            VALUES
+            (
+                %s,
+                %s
+            )
+            """,
+            [
+                (
+                    schedule_id,
+                    day
+                )
+                for day
+                in weekdays
+            ]
+        )
+
+        conn.commit()
+
+        return schedule_id
+
+    except Exception:
+
+        conn.rollback()
+        raise
+
+    finally:
+
+        cursor.close()
+        conn.close()
+
+
+def complete_calendar_once(
+    schedule_id
+):
+
+    conn = get_db_connection()
+    cursor = conn.cursor()
+
+    try:
+
+        cursor.execute(
+            """
+            UPDATE calendar_once
+
+            SET
+                completed = 1,
+                completed_at = NOW()
+
+            WHERE
+                id = %s
+                AND completed = 0
+            """,
+            (
+                int(schedule_id),
+            )
+        )
+
+        changed = (
+            cursor.rowcount > 0
+        )
+
+        conn.commit()
+
+        return changed
+
+    except Exception:
+
+        conn.rollback()
+        raise
+
+    finally:
+
+        cursor.close()
+        conn.close()
+
+
+def complete_calendar_weekly(
+    schedule_id,
+    scheduled_date=None
+):
+
+    from datetime import date
+
+    if scheduled_date is None:
+
+        target_date = date.today()
+
+    else:
+
+        target_date = (
+            _normalize_calendar_date(
+                scheduled_date
+            )
+        )
+
+    schedule_id = int(
+        schedule_id
+    )
+
+    conn = get_db_connection()
+    cursor = conn.cursor()
+
+    try:
+
+        cursor.execute(
+            """
+            SELECT id
+
+            FROM calendar_weekly
+
+            WHERE
+                id = %s
+                AND enabled = 1
+            """,
+            (
+                schedule_id,
+            )
+        )
+
+        if cursor.fetchone() is None:
+            return False
+
+        cursor.execute(
+            """
+            SELECT 1
+
+            FROM calendar_weekly_days
+
+            WHERE
+                schedule_id = %s
+                AND weekday = %s
+            """,
+            (
+                schedule_id,
+                target_date.weekday()
+            )
+        )
+
+        if cursor.fetchone() is None:
+
+            raise ValueError(
+                "指定日はこの定期予定の対象曜日ではありません。"
+            )
+
+        cursor.execute(
+            """
+            INSERT INTO calendar_weekly_status
+            (
+                schedule_id,
+                scheduled_date,
+                completed,
+                completed_at
+            )
+
+            VALUES
+            (
+                %s,
+                %s,
+                1,
+                NOW()
+            )
+
+            ON DUPLICATE KEY UPDATE
+
+                completed = 1,
+                completed_at = NOW()
+            """,
+            (
+                schedule_id,
+                target_date
+            )
+        )
+
+        conn.commit()
+
+        return True
+
+    except Exception:
+
+        conn.rollback()
+        raise
+
+    finally:
+
+        cursor.close()
+        conn.close()
+
+def _calendar_time_to_string(
+    value
+):
+
+    if value is None:
+        return None
+
+    if hasattr(
+        value,
+        "total_seconds"
+    ):
+
+        seconds = int(
+            value.total_seconds()
+        )
+
+        hours = (
+            seconds // 3600
+        )
+
+        minutes = (
+            seconds % 3600
+        ) // 60
+
+        seconds = (
+            seconds % 60
+        )
+
+        return (
+            f"{hours:02d}:"
+            f"{minutes:02d}:"
+            f"{seconds:02d}"
+        )
+
+    if hasattr(
+        value,
+        "strftime"
+    ):
+
+        return value.strftime(
+            "%H:%M:%S"
+        )
+
+    return str(value)
+
+
+def get_calendar_date(
+    target_date=None,
+    unfinished_only=True
+):
+
+    from datetime import date
+
+    if target_date is None:
+
+        target = date.today()
+
+    else:
+
+        target = (
+            _normalize_calendar_date(
+                target_date
+            )
+        )
+
+    weekday = (
+        target.weekday()
+    )
+
+    conn = get_db_connection()
+
+    once_cursor = conn.cursor(
+        dictionary=True
+    )
+
+    weekly_cursor = conn.cursor(
+        dictionary=True
+    )
+
+    try:
+
+        once_sql = """
+            SELECT
+                id,
+                title,
+                description,
+                scheduled_date,
+                start_time,
+                end_time,
+                completed,
+                completed_at,
+                source
+
+            FROM calendar_once
+
+            WHERE scheduled_date = %s
+        """
+
+        if unfinished_only:
+
+            once_sql += """
+                AND completed = 0
+            """
+
+        once_sql += """
+            ORDER BY
+                start_time IS NULL,
+                start_time,
+                id
+        """
+
+        once_cursor.execute(
+            once_sql,
+            (
+                target,
+            )
+        )
+
+        once_rows = (
+            once_cursor.fetchall()
+        )
+
+        weekly_sql = """
+            SELECT
+                cw.id,
+                cw.title,
+                cw.description,
+                cw.start_time,
+                cw.end_time,
+                cw.source,
+
+                COALESCE(
+                    cws.completed,
+                    0
+                ) AS completed,
+
+                cws.completed_at
+
+            FROM calendar_weekly AS cw
+
+            INNER JOIN calendar_weekly_days AS cwd
+
+                ON cw.id =
+                   cwd.schedule_id
+
+            LEFT JOIN calendar_weekly_status AS cws
+
+                ON cw.id =
+                   cws.schedule_id
+
+                AND cws.scheduled_date =
+                    %s
+
+            WHERE
+                cw.enabled = 1
+
+                AND cwd.weekday = %s
+        """
+
+        if unfinished_only:
+
+            weekly_sql += """
+                AND COALESCE(
+                    cws.completed,
+                    0
+                ) = 0
+            """
+
+        weekly_sql += """
+            ORDER BY
+                cw.start_time IS NULL,
+                cw.start_time,
+                cw.id
+        """
+
+        weekly_cursor.execute(
+            weekly_sql,
+            (
+                target,
+                weekday
+            )
+        )
+
+        weekly_rows = (
+            weekly_cursor.fetchall()
+        )
+
+        schedules = []
+
+        for row in once_rows:
+
+            schedules.append(
+                {
+                    "schedule_type":
+                        "once",
+
+                    "id":
+                        row["id"],
+
+                    "title":
+                        row["title"],
+
+                    "description":
+                        row["description"],
+
+                    "date":
+                        target.isoformat(),
+
+                    "start_time":
+                        _calendar_time_to_string(
+                            row["start_time"]
+                        ),
+
+                    "end_time":
+                        _calendar_time_to_string(
+                            row["end_time"]
+                        ),
+
+                    "completed":
+                        bool(
+                            row["completed"]
+                        )
+                }
+            )
+
+        for row in weekly_rows:
+
+            schedules.append(
+                {
+                    "schedule_type":
+                        "weekly",
+
+                    "id":
+                        row["id"],
+
+                    "title":
+                        row["title"],
+
+                    "description":
+                        row["description"],
+
+                    "date":
+                        target.isoformat(),
+
+                    "start_time":
+                        _calendar_time_to_string(
+                            row["start_time"]
+                        ),
+
+                    "end_time":
+                        _calendar_time_to_string(
+                            row["end_time"]
+                        ),
+
+                    "completed":
+                        bool(
+                            row["completed"]
+                        )
+                }
+            )
+
+        schedules.sort(
+            key=lambda x: (
+                x["start_time"]
+                is None,
+
+                x["start_time"]
+                or "",
+
+                x["id"]
+            )
+        )
+
+        return {
+            "date":
+                target.isoformat(),
+
+            "weekday":
+                weekday,
+
+            "count":
+                len(schedules),
+
+            "schedules":
+                schedules
+        }
+
+    finally:
+
+        once_cursor.close()
+        weekly_cursor.close()
+        conn.close()
+
+
+def get_calendar_today():
+
+    return get_calendar_date(
+        target_date=None,
+        unfinished_only=True
+    )
+
+# =========================================================
+# CSVインポート
+# =========================================================
+def import_calendar_csv(
+    csv_path
+):
+
+    import csv
+    import os
+
+    csv_path = os.path.abspath(
+        os.path.expanduser(
+            str(csv_path)
+        )
+    )
+
+    if not os.path.isfile(
+        csv_path
+    ):
+
+        raise FileNotFoundError(
+            f"CSVファイルがありません: {csv_path}"
+        )
+
+    added = 0
+    skipped = 0
+    errors = []
+
+    with open(
+        csv_path,
+        "r",
+        encoding="utf-8-sig",
+        newline=""
+    ) as f:
+
+        reader = csv.DictReader(
+            f
+        )
+
+        for row_number, row in enumerate(
+            reader,
+            start=2
+        ):
+
+            try:
+
+                schedule_type = str(
+                    row.get(
+                        "type",
+                        ""
+                    )
+                ).strip().lower()
+
+                title = str(
+                    row.get(
+                        "title",
+                        ""
+                    )
+                ).strip()
+
+                description = (
+                    str(
+                        row.get(
+                            "description"
+                        )
+                        or ""
+                    ).strip()
+                    or None
+                )
+
+                start_time = (
+                    str(
+                        row.get(
+                            "start_time"
+                        )
+                        or ""
+                    ).strip()
+                    or None
+                )
+
+                end_time = (
+                    str(
+                        row.get(
+                            "end_time"
+                        )
+                        or ""
+                    ).strip()
+                    or None
+                )
+
+                if (
+                    schedule_type
+                    == "once"
+                ):
+
+                    scheduled_date = (
+                        str(
+                            row.get(
+                                "date"
+                            )
+                            or ""
+                        ).strip()
+                    )
+
+                    add_calendar_once(
+                        title=title,
+                        scheduled_date=scheduled_date,
+                        start_time=start_time,
+                        end_time=end_time,
+                        description=description,
+                        source="csv"
+                    )
+
+                elif (
+                    schedule_type
+                    == "weekly"
+                ):
+
+                    weekday_text = str(
+                        row.get(
+                            "weekdays"
+                        )
+                        or ""
+                    ).strip()
+
+                    weekdays = [
+                        int(x)
+                        for x
+                        in weekday_text.split(
+                            "|"
+                        )
+                        if x.strip()
+                    ]
+
+                    add_calendar_weekly(
+                        title=title,
+                        weekdays=weekdays,
+                        start_time=start_time,
+                        end_time=end_time,
+                        description=description,
+                        source="csv"
+                    )
+
+                else:
+
+                    raise ValueError(
+                        f"未対応type: "
+                        f"{schedule_type}"
+                    )
+
+                added += 1
+
+            except Exception as e:
+
+                skipped += 1
+
+                errors.append(
+                    {
+                        "row":
+                            row_number,
+
+                        "error":
+                            str(e)
+                    }
+                )
+
+    return {
+        "success":
+            True,
+
+        "added":
+            added,
+
+        "skipped":
+            skipped,
+
+        "errors":
+            errors
+    }
+
+# =========================================================
+#カレンダーDB初期化
+#========================================================
+
+try:
+
+    init_calendar_tables()
+
+except Exception as e:
+
+    print("")
+    print(
+        " Calendar Databaseを"
+        "初期化できませんでした。"
+    )
+
+    print(
+        f" {e}"
+    )
+
+
 
 def load_settings_from_db(section_name):
     """settingsテーブルから指定セクションをConfigParser形式で返す。"""
@@ -2039,7 +3198,261 @@ def _schedule_tools():
                 "required": ["schedule_id"],
                 "additionalProperties": False
             }
-        }
+        },
+        {
+    "type": "function",
+
+    "name":
+        "calendar_add_once",
+
+    "description": (
+        "通知なしの単発予定を登録します。"
+        "特定の日だけ存在する予定に使用します。"
+    ),
+
+    "strict": True,
+
+    "parameters": {
+        "type": "object",
+
+        "properties": {
+
+            "title": {
+                "type": "string"
+            },
+
+            "scheduled_date": {
+                "type": "string",
+                "description":
+                    "YYYY-MM-DD"
+            },
+
+            "start_time": {
+                "type": [
+                    "string",
+                    "null"
+                ]
+            },
+
+            "end_time": {
+                "type": [
+                    "string",
+                    "null"
+                ]
+            },
+
+            "description": {
+                "type": [
+                    "string",
+                    "null"
+                ]
+            }
+        },
+
+        "required": [
+            "title",
+            "scheduled_date",
+            "start_time",
+            "end_time",
+            "description"
+        ],
+
+        "additionalProperties":
+            False
+    }
+},{
+    "type": "function",
+
+    "name":
+        "calendar_add_weekly",
+
+    "description": (
+        "曜日条件付きの定期予定を登録します。"
+        "曜日番号は"
+        "月0、火1、水2、木3、"
+        "金4、土5、日6です。"
+    ),
+
+    "strict": True,
+
+    "parameters": {
+
+        "type": "object",
+
+        "properties": {
+
+            "title": {
+                "type": "string"
+            },
+
+            "weekdays": {
+
+                "type": "array",
+
+                "items": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 6
+                }
+            },
+
+            "start_time": {
+                "type": [
+                    "string",
+                    "null"
+                ]
+            },
+
+            "end_time": {
+                "type": [
+                    "string",
+                    "null"
+                ]
+            },
+
+            "description": {
+                "type": [
+                    "string",
+                    "null"
+                ]
+            }
+        },
+
+        "required": [
+            "title",
+            "weekdays",
+            "start_time",
+            "end_time",
+            "description"
+        ],
+
+        "additionalProperties":
+            False
+    }
+},{
+    "type": "function",
+
+    "name":
+        "calendar_get_today",
+
+    "description":
+        "今日の未完了予定を取得します。",
+
+    "strict": True,
+
+    "parameters": {
+
+        "type": "object",
+
+        "properties": {},
+
+        "required": [],
+
+        "additionalProperties":
+            False
+    }
+},{
+    "type": "function",
+
+    "name":
+        "calendar_complete_once",
+
+    "description":
+        "単発予定を完了済みにします。",
+
+    "strict": True,
+
+    "parameters": {
+
+        "type": "object",
+
+        "properties": {
+
+            "schedule_id": {
+                "type": "integer"
+            }
+        },
+
+        "required": [
+            "schedule_id"
+        ],
+
+        "additionalProperties":
+            False
+    }
+},{
+    "type": "function",
+
+    "name":
+        "calendar_complete_weekly",
+
+    "description": (
+        "曜日条件付き定期予定の"
+        "その日分だけを完了済みにします。"
+    ),
+
+    "strict": True,
+
+    "parameters": {
+
+        "type": "object",
+
+        "properties": {
+
+            "schedule_id": {
+                "type": "integer"
+            },
+
+            "scheduled_date": {
+                "type": [
+                    "string",
+                    "null"
+                ],
+
+                "description":
+                    "YYYY-MM-DD。"
+                    "今日ならnull"
+            }
+        },
+
+        "required": [
+            "schedule_id",
+            "scheduled_date"
+        ],
+
+        "additionalProperties":
+            False
+    }
+},{
+    "type": "function",
+
+    "name":
+        "calendar_import_csv",
+
+    "description":
+        "CSVから予定を一括登録します。",
+
+    "strict": True,
+
+    "parameters": {
+
+        "type": "object",
+
+        "properties": {
+
+            "path": {
+                "type": "string"
+            }
+        },
+
+        "required": [
+            "path"
+        ],
+
+        "additionalProperties":
+            False
+    }
+}
     ]
 
 def _json_safe_schedule_rows(rows):
@@ -2123,7 +3536,151 @@ def execute_avelia_tool(tool_name, arguments):
             "schedule_id": arguments["schedule_id"],
             "deleted": deleted,
         }
+    if tool_name == "calendar_add_once":
 
+        schedule_id = (
+            add_calendar_once(
+                title=arguments[
+                    "title"
+                ],
+
+                scheduled_date=arguments[
+                    "scheduled_date"
+                ],
+
+                start_time=arguments[
+                    "start_time"
+                ],
+
+                end_time=arguments[
+                    "end_time"
+                ],
+
+                description=arguments[
+                    "description"
+                ]
+            )
+        )
+
+        return {
+            "success": True,
+
+            "schedule_type":
+                "once",
+
+            "schedule_id":
+                schedule_id
+        }
+
+
+    if tool_name == "calendar_add_weekly":
+
+        schedule_id = (
+            add_calendar_weekly(
+                title=arguments[
+                    "title"
+                ],
+
+                weekdays=arguments[
+                    "weekdays"
+                ],
+
+                start_time=arguments[
+                    "start_time"
+                ],
+
+                end_time=arguments[
+                    "end_time"
+                ],
+
+                description=arguments[
+                    "description"
+                ]
+            )
+        )
+
+        return {
+            "success": True,
+
+            "schedule_type":
+                "weekly",
+
+            "schedule_id":
+                schedule_id
+        }
+
+
+    if tool_name == "calendar_get_today":
+
+        result = (
+            get_calendar_today()
+        )
+
+        return {
+            "success": True,
+            **result
+        }
+
+
+    if tool_name == "calendar_complete_once":
+
+        completed = (
+            complete_calendar_once(
+                arguments[
+                    "schedule_id"
+                ]
+            )
+        )
+
+        return {
+            "success":
+                completed,
+
+            "schedule_id":
+                arguments[
+                    "schedule_id"
+                ],
+
+            "completed":
+                completed
+        }
+
+
+    if tool_name == "calendar_complete_weekly":
+
+        completed = (
+            complete_calendar_weekly(
+                schedule_id=arguments[
+                    "schedule_id"
+                ],
+
+                scheduled_date=arguments[
+                    "scheduled_date"
+                ]
+            )
+        )
+
+        return {
+            "success":
+                completed,
+
+            "schedule_id":
+                arguments[
+                    "schedule_id"
+                ],
+
+            "completed":
+                completed
+        }
+
+
+    if tool_name == "calendar_import_csv":
+
+        return import_calendar_csv(
+            arguments[
+                "path"
+            ]
+        )
     raise ValueError(f"未対応のToolです: {tool_name}")
 
 
