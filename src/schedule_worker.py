@@ -8,11 +8,6 @@ import time
 import mysql.connector
 import requests
 
-
-DATABASE_CONF = "/opt/Anvelk-Mainframe/config/database.conf"
-CHECK_INTERVAL = 30
-
-
 # =========================================================
 # Database
 # =========================================================
@@ -102,6 +97,48 @@ def load_database_config():
         "autocommit": False,
     }
 
+def get_connection():
+    return mysql.connector.connect(
+        **load_database_config()
+    )
+
+def load_scheduler_interval():
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    try:
+        cursor.execute(
+            """
+            SELECT setting_value
+            FROM settings
+            WHERE section_name = %s
+              AND setting_key = %s
+            LIMIT 1
+            """,
+            ("SCHEDULER", "check_interval"),
+        )
+
+        row = cursor.fetchone()
+
+        if row is None:
+            return 30
+
+        try:
+            value = int(row[0])
+        except (TypeError, ValueError):
+            return 30
+
+        if value < 1:
+            return 30
+
+        return value
+
+    finally:
+        cursor.close()
+        conn.close()
+
+DATABASE_CONF = "/opt/Anvelk-Mainframe/config/database.conf"
+CHECK_INTERVAL = load_scheduler_interval()
 
 def get_connection():
     return mysql.connector.connect(
