@@ -293,6 +293,80 @@ def delete_schedule(schedule_id):
     finally:
         cursor.close()
         conn.close()
+def delete_calendar_once(schedule_id):
+    """単発予定を削除する。"""
+
+    conn = get_db_connection()
+    cursor = conn.cursor()
+
+    try:
+        cursor.execute(
+            """
+            DELETE FROM calendar_once
+            WHERE id = %s
+            """,
+            (
+                int(schedule_id),
+            )
+        )
+
+        deleted = (
+            cursor.rowcount > 0
+        )
+
+        conn.commit()
+
+        return deleted
+
+    except Exception:
+        conn.rollback()
+        raise
+
+    finally:
+        cursor.close()
+        conn.close()
+
+
+def delete_calendar_weekly(schedule_id):
+    """
+    曜日条件付き予定を削除する。
+
+    calendar_weekly_days と
+    calendar_weekly_status は
+    FOREIGN KEY ON DELETE CASCADE により
+    自動削除される。
+    """
+
+    conn = get_db_connection()
+    cursor = conn.cursor()
+
+    try:
+        cursor.execute(
+            """
+            DELETE FROM calendar_weekly
+            WHERE id = %s
+            """,
+            (
+                int(schedule_id),
+            )
+        )
+
+        deleted = (
+            cursor.rowcount > 0
+        )
+
+        conn.commit()
+
+        return deleted
+
+    except Exception:
+        conn.rollback()
+        raise
+
+    finally:
+        cursor.close()
+        conn.close()
+
 
 
 try:
@@ -3452,7 +3526,118 @@ def _schedule_tools():
         "additionalProperties":
             False
     }
-}
+},
+{
+    "type": "function",
+
+    "name":
+        "calendar_delete_once",
+
+    "description": (
+        "単発予定を削除します。"
+        "ユーザーが予定の削除を明示的に依頼した場合に使用してください。"
+    ),
+
+    "strict": True,
+
+    "parameters": {
+
+        "type": "object",
+
+        "properties": {
+
+            "schedule_id": {
+                "type": "integer",
+                "description":
+                    "削除する単発予定ID"
+            }
+        },
+
+        "required": [
+            "schedule_id"
+        ],
+
+        "additionalProperties":
+            False
+    }
+},
+    {
+    "type": "function",
+
+    "name":
+        "calendar_delete_weekly",
+
+    "description": (
+        "曜日条件付きの定期予定を削除します。"
+        "ユーザーが定期予定そのものの削除を明示的に依頼した場合に使用してください。"
+        "今日の分だけ取り消す場合には使用しません。"
+    ),
+
+    "strict": True,
+
+    "parameters": {
+
+        "type": "object",
+
+        "properties": {
+
+            "schedule_id": {
+                "type": "integer",
+                "description":
+                    "削除する定期予定ID"
+            }
+        },
+
+        "required": [
+            "schedule_id"
+        ],
+
+        "additionalProperties":
+            False
+    }
+},{
+    "type": "function",
+
+    "name":
+        "calendar_get_date",
+
+    "description": (
+        "指定日の通常予定を取得します。"
+        "単発予定と、その日に該当する曜日条件付き定期予定の両方を返します。"
+        "『明日』『明後日』『9月10日』などの自然言語の日付は、"
+        "system promptにある現在時刻を基準にYYYY-MM-DDへ変換してください。"
+    ),
+
+    "strict": True,
+
+    "parameters": {
+
+        "type": "object",
+
+        "properties": {
+
+            "scheduled_date": {
+                "type": "string",
+                "description":
+                    "取得する日付。YYYY-MM-DD形式"
+            },
+
+            "unfinished_only": {
+                "type": "boolean",
+                "description":
+                    "trueなら未完了予定のみ取得する"
+            }
+        },
+
+        "required": [
+            "scheduled_date",
+            "unfinished_only"
+        ],
+
+        "additionalProperties":
+            False
+    }
+},
     ]
 
 def _json_safe_schedule_rows(rows):
@@ -3536,6 +3721,7 @@ def execute_avelia_tool(tool_name, arguments):
             "schedule_id": arguments["schedule_id"],
             "deleted": deleted,
         }
+
     if tool_name == "calendar_add_once":
 
         schedule_id = (
@@ -3681,6 +3867,79 @@ def execute_avelia_tool(tool_name, arguments):
                 "path"
             ]
         )
+
+    if tool_name == "calendar_delete_once":
+
+        deleted = (
+            delete_calendar_once(
+                arguments[
+                    "schedule_id"
+                ]
+            )
+        )
+
+        return {
+            "success":
+                deleted,
+
+            "schedule_type":
+                "once",
+
+            "schedule_id":
+                arguments[
+                    "schedule_id"
+                ],
+
+            "deleted":
+                deleted
+        }
+
+
+    if tool_name == "calendar_delete_weekly":
+
+        deleted = (
+            delete_calendar_weekly(
+                arguments[
+                    "schedule_id"
+                ]
+            )
+        )
+
+        return {
+            "success":
+                deleted,
+
+            "schedule_type":
+                "weekly",
+
+            "schedule_id":
+                arguments[
+                    "schedule_id"
+                ],
+
+            "deleted":
+                deleted
+        }
+    if tool_name == "calendar_get_date":
+
+        result = (
+            get_calendar_date(
+                target_date=arguments[
+                    "scheduled_date"
+                ],
+
+                unfinished_only=bool(
+                    arguments[
+                        "unfinished_only"
+                    ]
+                )
+            )
+        )
+
+        return {
+            "success": True,
+            **result
+        }
     raise ValueError(f"未対応のToolです: {tool_name}")
 
 
