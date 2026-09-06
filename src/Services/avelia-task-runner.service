@@ -1,0 +1,26 @@
+[Unit]
+Description=Avelia Scheduled Task Runner
+After=network-online.target mariadb.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+
+User=admin
+Group=admin
+
+WorkingDirectory=/opt/Anvelk-Mainframe
+
+ExecStart=/opt/Anvelk-Mainframe/.venv/bin/python /opt/Anvelk-Mainframe/task_runner.py
+
+Restart=on-failure
+RestartSec=5
+
+NoNewPrivileges=true
+PrivateTmp=true
+
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

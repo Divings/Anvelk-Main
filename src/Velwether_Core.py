@@ -16,6 +16,16 @@ from pack.run_System import run_system_command,block_cmd
 from pack.read_file import read_local_file
 from pack.slack_notify import notify_slack
 from pack.write_file import write_local_file
+from packs.task_tools import (
+    add_one_shot_task,
+    add_weekly_task,
+    list_tasks,
+    get_task,
+    disable_task,
+    enable_task,
+    retry_task,
+    delete_task,
+)
 from pack.sessions import (
     Create_session,
     End_session,
@@ -3637,7 +3647,225 @@ def _schedule_tools():
         "additionalProperties":
             False
     }
-},
+},{
+        "type": "function",
+        "name": "add_one_shot_task",
+        "description": (
+            "指定した日付と時刻に一度だけ"
+            "プログラムを実行するタスクを登録する"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "task_name": {
+                    "type": "string",
+                    "description": "タスク名"
+                },
+                "program_path": {
+                    "type": "string",
+                    "description": "実行するプログラムの絶対パス"
+                },
+                "arguments": {
+                    "type": ["string", "null"],
+                    "description": "プログラム引数"
+                },
+                "working_directory": {
+                    "type": ["string", "null"],
+                    "description": "作業ディレクトリ"
+                },
+                "run_date": {
+                    "type": "string",
+                    "description": "実行日。YYYY-MM-DD形式"
+                },
+                "run_time": {
+                    "type": "string",
+                    "description": "実行時刻。HH:MM または HH:MM:SS形式"
+                },
+            },
+            "required": [
+                "task_name",
+                "program_path",
+                "run_date",
+                "run_time",
+            ],
+            "additionalProperties": False,
+        },
+    },
+
+    {
+        "type": "function",
+        "name": "add_weekly_task",
+        "description": (
+            "指定曜日と時刻に毎週実行する"
+            "プログラムタスクを登録する"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "task_name": {
+                    "type": "string",
+                    "description": "タスク名"
+                },
+                "program_path": {
+                    "type": "string",
+                    "description": "実行するプログラムの絶対パス"
+                },
+                "arguments": {
+                    "type": ["string", "null"],
+                    "description": "プログラム引数"
+                },
+                "working_directory": {
+                    "type": ["string", "null"],
+                    "description": "作業ディレクトリ"
+                },
+                "weekday": {
+                    "type": "string",
+                    "description": (
+                        "曜日。月曜日、火曜日などの日本語、"
+                        "または monday などの英語"
+                    )
+                },
+                "run_time": {
+                    "type": "string",
+                    "description": "実行時刻。HH:MM または HH:MM:SS形式"
+                },
+            },
+            "required": [
+                "task_name",
+                "program_path",
+                "weekday",
+                "run_time",
+            ],
+            "additionalProperties": False,
+        },
+    },
+
+    {
+        "type": "function",
+        "name": "list_tasks",
+        "description": (
+            "登録されているスケジュールタスク一覧を取得する"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "include_disabled": {
+                    "type": "boolean",
+                    "description": "無効化済みタスクも含めるか"
+                }
+            },
+            "required": [],
+            "additionalProperties": False,
+        },
+    },
+
+    {
+        "type": "function",
+        "name": "get_task",
+        "description": (
+            "指定したIDのスケジュールタスク詳細を取得する"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "task_id": {
+                    "type": "integer",
+                    "description": "タスクID"
+                }
+            },
+            "required": [
+                "task_id"
+            ],
+            "additionalProperties": False,
+        },
+    },
+
+    {
+        "type": "function",
+        "name": "disable_task",
+        "description": (
+            "指定したタスクを無効化する。"
+            "実行中のタスクは無効化しない"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "task_id": {
+                    "type": "integer",
+                    "description": "タスクID"
+                }
+            },
+            "required": [
+                "task_id"
+            ],
+            "additionalProperties": False,
+        },
+    },
+
+    {
+        "type": "function",
+        "name": "enable_task",
+        "description": (
+            "無効化されたタスクを再度pending状態に戻す"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "task_id": {
+                    "type": "integer",
+                    "description": "タスクID"
+                }
+            },
+            "required": [
+                "task_id"
+            ],
+            "additionalProperties": False,
+        },
+    },
+
+    {
+        "type": "function",
+        "name": "retry_task",
+        "description": (
+            "failed状態のタスクをpendingに戻し、"
+            "再実行可能な状態にする"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "task_id": {
+                    "type": "integer",
+                    "description": "タスクID"
+                }
+            },
+            "required": [
+                "task_id"
+            ],
+            "additionalProperties": False,
+        },
+    },
+
+    {
+        "type": "function",
+        "name": "delete_task",
+        "description": (
+            "指定したタスクを削除する。"
+            "実行中のタスクは削除しない"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "task_id": {
+                    "type": "integer",
+                    "description": "タスクID"
+                }
+            },
+            "required": [
+                "task_id"
+            ],
+            "additionalProperties": False,
+        },
+    },
     ]
 
 def _json_safe_schedule_rows(rows):
@@ -3656,6 +3884,83 @@ def _json_safe_schedule_rows(rows):
 
 def execute_avelia_tool(tool_name, arguments):
     """OpenAIから要求されたローカルToolを実行する。"""
+    TASK_DB_CONFIG = load_database_config()
+    if tool_name == "add_one_shot_task":
+
+        return add_one_shot_task(
+            TASK_DB_CONFIG,
+            task_name=arguments["task_name"],
+            program_path=arguments["program_path"],
+            run_date=arguments["run_date"],
+            run_time=arguments["run_time"],
+            arguments=arguments.get(
+                "arguments"
+            ),
+            working_directory=arguments.get(
+                "working_directory"
+            ),
+        )
+
+    elif tool_name == "add_weekly_task":
+
+        return add_weekly_task(
+            TASK_DB_CONFIG,
+            task_name=arguments["task_name"],
+            program_path=arguments["program_path"],
+            weekday=arguments["weekday"],
+            run_time=arguments["run_time"],
+            arguments=arguments.get(
+                "arguments"
+            ),
+            working_directory=arguments.get(
+                "working_directory"
+            ),
+        )
+
+    elif tool_name == "list_tasks":
+
+        return list_tasks(
+            TASK_DB_CONFIG,
+            include_disabled=arguments.get(
+                "include_disabled",
+                False
+            ),
+        )
+
+    elif tool_name == "get_task":
+
+        return get_task(
+            TASK_DB_CONFIG,
+            arguments["task_id"]
+        )
+
+    elif tool_name == "disable_task":
+
+        return disable_task(
+            TASK_DB_CONFIG,
+            arguments["task_id"]
+        )
+
+    elif tool_name == "enable_task":
+
+        return enable_task(
+            TASK_DB_CONFIG,
+            arguments["task_id"]
+        )
+
+    elif tool_name == "retry_task":
+
+        return retry_task(
+            TASK_DB_CONFIG,
+            arguments["task_id"]
+        )
+
+    elif tool_name == "delete_task":
+
+        return delete_task(
+            TASK_DB_CONFIG,
+            arguments["task_id"]
+        )
     if tool_name == "write_file":
         return write_local_file(
             arguments["path"],
