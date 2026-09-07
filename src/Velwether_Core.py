@@ -49,10 +49,6 @@ from pack.Auth import authorize_environment
 
 import uuid
 
-
-
-
-
 result = authorize_environment()
 if not result["ok"]:
     reason = result["reason"]
@@ -1731,7 +1727,7 @@ def get_appdata_dir():
 # =========================================================
 
 APP_DATA=get_appdata_dir()
-CONFIG_DIR = "config"
+CONFIG_DIR = "/opt/Anvelk-Mainframe/config"
 from pathlib import Path
 
 DATA_DIR = Path.home() / ".local" / "share" / "Avelia"

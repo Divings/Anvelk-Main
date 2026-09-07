@@ -10,7 +10,7 @@ from pack.knowledge import (
 )
 
 
-DATABASE_CONFIG = Path("config/database.conf")
+DATABASE_CONFIG = Path("/opt/Anvelk-Mainframe/config/database.conf")
 
 
 LEARNING_KEYWORDS = [

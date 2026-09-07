@@ -3,7 +3,7 @@ import configparser
 import mysql.connector
 import uuid
 
-DATABASE_CONFIG = Path("config/database.conf")
+DATABASE_CONFIG = Path("/opt/Anvelk-Mainframe/config/database.conf")
 
 
 def _connect_db():

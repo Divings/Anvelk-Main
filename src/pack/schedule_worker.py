@@ -7,7 +7,7 @@ import mysql.connector
 from slack_notify import notify_slack
 
 
-DATABASE_CONF = "/opt/config/database.conf"
+DATABASE_CONF = "/opt/Anvelk-Mainframe/config/database.conf"
 CHECK_INTERVAL = 30
 
 
