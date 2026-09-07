@@ -1731,7 +1731,7 @@ CONFIG_DIR = "/opt/Anvelk-Mainframe/config"
 from pathlib import Path
 
 DATA_DIR = Path.home() / ".local" / "share" / "Avelia"
-LOG_DIR ="logs"
+LOG_DIR = DATA_DIR / "logs"
 
 MEMORY_KEY_FILE = os.path.join(
     DATA_DIR,

@@ -10,7 +10,7 @@ import mysql.connector
 # 設定
 # =========================================================
 
-DATABASE_CONFIG = Path("config/database.conf")
+DATABASE_CONFIG = Path("/opt/Anvelk-Mainframe/config/database.conf")
 
 
 # =========================================================
