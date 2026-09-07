@@ -16,7 +16,7 @@ from pack.run_System import run_system_command,block_cmd
 from pack.read_file import read_local_file
 from pack.slack_notify import notify_slack
 from pack.write_file import write_local_file
-from packs.task_tools import (
+from pack.task_tools import (
     add_one_shot_task,
     add_weekly_task,
     list_tasks,
@@ -48,6 +48,10 @@ from pack.knowledge import (
 from pack.Auth import authorize_environment
 
 import uuid
+
+
+
+
 
 result = authorize_environment()
 if not result["ok"]:
@@ -4497,7 +4501,7 @@ def main():
             " 記憶機能は無効です。この会話は終了時に保存されません。"
         )
     print("")
-
+    os.chdir(Path.home())
     if pre_clear:
         # 起動時に画面クリアする場合は少し待機してからクリア(その後簡単なメニュー表示)
         print("2秒後に画面をクリアします...")

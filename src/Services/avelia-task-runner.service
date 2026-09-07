@@ -6,9 +6,6 @@ Wants=network-online.target
 [Service]
 Type=simple
 
-User=admin
-Group=admin
-
 WorkingDirectory=/opt/Anvelk-Mainframe
 
 ExecStart=/opt/Anvelk-Mainframe/.venv/bin/python /opt/Anvelk-Mainframe/task_runner.py
