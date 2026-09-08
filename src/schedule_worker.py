@@ -15,6 +15,9 @@ import requests
 
 DATABASE_CONF = "/opt/Anvelk-Mainframe/config/database.conf"
 
+DEFAULT_CHECK_INTERVAL = 30
+DEFAULT_NOTIFY_BEFORE_MINUTES = 5
+
 
 # =========================================================
 # Database
@@ -112,14 +115,126 @@ def get_connection():
     )
 
 
-def load_scheduler_interval():
+# =========================================================
+# Settings
+# =========================================================
+
+def ensure_scheduler_settings():
     """
-    settingsテーブルから
-    スケジュール確認間隔を取得する。
+    SCHEDULER設定が存在しなければ追加する。
 
-    SCHEDULER / check_interval
+    check_interval:
+        DBを確認する間隔（秒）
 
-    未設定・不正値の場合は30秒。
+    notify_before_minutes:
+        予定開始何分前に通知するか
+    """
+
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    try:
+        # check_interval
+        cursor.execute(
+            """
+            SELECT 1
+            FROM settings
+            WHERE section_name = %s
+              AND setting_key = %s
+            LIMIT 1
+            """,
+            (
+                "SCHEDULER",
+                "check_interval",
+            )
+        )
+
+        if cursor.fetchone() is None:
+            cursor.execute(
+                """
+                INSERT INTO settings (
+                    section_name,
+                    setting_key,
+                    setting_value
+                )
+                VALUES (%s, %s, %s)
+                """,
+                (
+                    "SCHEDULER",
+                    "check_interval",
+                    str(DEFAULT_CHECK_INTERVAL),
+                )
+            )
+
+            print(
+                "[Avelia Schedule] "
+                "settingsへ "
+                "SCHEDULER/check_interval="
+                f"{DEFAULT_CHECK_INTERVAL} を追加",
+                flush=True
+            )
+
+        # notify_before_minutes
+        cursor.execute(
+            """
+            SELECT 1
+            FROM settings
+            WHERE section_name = %s
+              AND setting_key = %s
+            LIMIT 1
+            """,
+            (
+                "SCHEDULER",
+                "notify_before_minutes",
+            )
+        )
+
+        if cursor.fetchone() is None:
+            cursor.execute(
+                """
+                INSERT INTO settings (
+                    section_name,
+                    setting_key,
+                    setting_value
+                )
+                VALUES (%s, %s, %s)
+                """,
+                (
+                    "SCHEDULER",
+                    "notify_before_minutes",
+                    str(DEFAULT_NOTIFY_BEFORE_MINUTES),
+                )
+            )
+
+            print(
+                "[Avelia Schedule] "
+                "settingsへ "
+                "SCHEDULER/notify_before_minutes="
+                f"{DEFAULT_NOTIFY_BEFORE_MINUTES} を追加",
+                flush=True
+            )
+
+        conn.commit()
+
+    except Exception:
+        conn.rollback()
+        raise
+
+    finally:
+        cursor.close()
+        conn.close()
+
+
+def load_integer_setting(
+    section_name,
+    setting_key,
+    default_value,
+    minimum=0
+):
+    """
+    settingsテーブルから整数設定を取得する。
+
+    未設定または不正値の場合はdefault_valueを返す。
     """
 
     conn = get_connection()
@@ -135,24 +250,24 @@ def load_scheduler_interval():
             LIMIT 1
             """,
             (
-                "SCHEDULER",
-                "check_interval",
+                section_name,
+                setting_key,
             )
         )
 
         row = cursor.fetchone()
 
         if row is None:
-            return 30
+            return default_value
 
         try:
             value = int(row[0])
 
         except (TypeError, ValueError):
-            return 30
+            return default_value
 
-        if value < 1:
-            return 30
+        if value < minimum:
+            return default_value
 
         return value
 
@@ -161,7 +276,22 @@ def load_scheduler_interval():
         conn.close()
 
 
-CHECK_INTERVAL = load_scheduler_interval()
+def load_scheduler_interval():
+    return load_integer_setting(
+        "SCHEDULER",
+        "check_interval",
+        DEFAULT_CHECK_INTERVAL,
+        minimum=1
+    )
+
+
+def load_notify_before_minutes():
+    return load_integer_setting(
+        "SCHEDULER",
+        "notify_before_minutes",
+        DEFAULT_NOTIFY_BEFORE_MINUTES,
+        minimum=0
+    )
 
 
 # =========================================================
@@ -175,8 +305,7 @@ def load_slack_webhook_url(conn):
     優先順位:
         1. 環境変数 SLACK_WEBHOOK_URL
         2. settingsテーブル
-           section_name = SLACK
-           setting_key  = webhook_url
+           SLACK / webhook_url
     """
 
     env_url = os.getenv(
@@ -234,22 +363,18 @@ def notify_slack(
 ):
     """
     Slack Incoming Webhookへ通知する。
-
-    HTTP 2xx以外または通信エラーの場合は例外にする。
     """
 
     webhook_url = load_slack_webhook_url(
         conn
     )
 
-    payload = {
-        "text": message
-    }
-
     try:
         response = requests.post(
             webhook_url,
-            json=payload,
+            json={
+                "text": message
+            },
             timeout=10
         )
 
@@ -326,10 +451,13 @@ def init_table():
         conn.close()
 
 
-def get_due_messages(conn):
+def get_due_messages(
+    conn,
+    notify_before_minutes
+):
     """
-    現在時刻までに通知時刻を迎えた
-    未通知メッセージを取得する。
+    通知時刻のN分前を迎えた
+    未通知schedulesを取得する。
     """
 
     cursor = conn.cursor(
@@ -350,12 +478,20 @@ def get_due_messages(conn):
 
             WHERE
                 message_use = 0
-                AND scheduled_at <= NOW()
+
+                AND scheduled_at <=
+                    DATE_ADD(
+                        NOW(),
+                        INTERVAL %s MINUTE
+                    )
 
             ORDER BY
                 scheduled_at ASC,
                 id ASC
-            """
+            """,
+            (
+                notify_before_minutes,
+            )
         )
 
         return cursor.fetchall()
@@ -368,10 +504,6 @@ def mark_message_used(
     conn,
     message_id
 ):
-    """
-    schedulesの通知を使用済みにする。
-    """
-
     cursor = conn.cursor()
 
     try:
@@ -401,40 +533,37 @@ def mark_message_used(
         cursor.close()
 
 
-def build_message(schedule):
-    """
-    schedules用Slack通知本文。
-    """
-
+def build_message(
+    schedule,
+    notify_before_minutes
+):
     return (
         "[アヴェリア スケジュール]\n"
         f"{schedule['title']}\n\n"
         f"{schedule['message']}\n\n"
         "予定時刻: "
-        f"{schedule['scheduled_at'].strftime('%Y-%m-%d %H:%M')}"
+        f"{schedule['scheduled_at'].strftime('%Y-%m-%d %H:%M')}\n"
+        f"{notify_before_minutes}分前通知"
     )
 
 
-def process_schedules():
-    """
-    schedulesの通知処理。
-
-    Slack送信成功後だけ
-    message_use = 1 にする。
-    """
-
+def process_schedules(
+    notify_before_minutes
+):
     conn = get_connection()
 
     try:
         schedules = get_due_messages(
-            conn
+            conn,
+            notify_before_minutes
         )
 
         for schedule in schedules:
 
             try:
                 message = build_message(
-                    schedule
+                    schedule,
+                    notify_before_minutes
                 )
 
                 notify_slack(
@@ -474,13 +603,14 @@ def process_schedules():
 # calendar_once
 # =========================================================
 
-def get_due_calendar_once(conn):
+def get_due_calendar_once(
+    conn,
+    notify_before_minutes
+):
     """
-    開始時刻を迎えた単発予定のうち、
-    まだ通知していない予定を取得する。
+    開始時刻のN分前を迎えた単発予定を取得する。
 
-    サービス停止中に予定時刻を過ぎても、
-    復旧後の最初のチェックで取得される。
+    notified = 0 の予定だけ対象。
     """
 
     cursor = conn.cursor(
@@ -511,13 +641,19 @@ def get_due_calendar_once(conn):
                 AND TIMESTAMP(
                     scheduled_date,
                     start_time
-                ) <= NOW()
+                ) <= DATE_ADD(
+                    NOW(),
+                    INTERVAL %s MINUTE
+                )
 
             ORDER BY
                 scheduled_date ASC,
                 start_time ASC,
                 id ASC
-            """
+            """,
+            (
+                notify_before_minutes,
+            )
         )
 
         return cursor.fetchall()
@@ -530,12 +666,6 @@ def mark_calendar_once_notified(
     conn,
     schedule_id
 ):
-    """
-    単発予定を通知済みにする。
-
-    Slack通知成功後に呼び出す。
-    """
-
     cursor = conn.cursor()
 
     try:
@@ -565,11 +695,10 @@ def mark_calendar_once_notified(
         cursor.close()
 
 
-def build_calendar_once_message(schedule):
-    """
-    単発予定のSlack通知本文。
-    """
-
+def build_calendar_once_message(
+    schedule,
+    notify_before_minutes
+):
     message = (
         "[アヴェリア 予定通知]\n"
         f"{schedule['title']}\n"
@@ -597,25 +726,22 @@ def build_calendar_once_message(schedule):
             f"{schedule['end_time']}"
         )
 
+    message += (
+        f"\n{notify_before_minutes}分前通知"
+    )
+
     return message
 
 
-def process_calendar_once():
-    """
-    単発予定を通知する。
-
-    Slack送信成功後だけ notified = 1 にする。
-
-    Slack送信に失敗した場合は
-    notified = 0 のままなので、
-    次回チェック時に再試行される。
-    """
-
+def process_calendar_once(
+    notify_before_minutes
+):
     conn = get_connection()
 
     try:
         schedules = get_due_calendar_once(
-            conn
+            conn,
+            notify_before_minutes
         )
 
         for schedule in schedules:
@@ -623,7 +749,8 @@ def process_calendar_once():
             try:
                 message = (
                     build_calendar_once_message(
-                        schedule
+                        schedule,
+                        notify_before_minutes
                     )
                 )
 
@@ -664,10 +791,13 @@ def process_calendar_once():
 # calendar_weekly
 # =========================================================
 
-def get_due_calendar_weekly(conn):
+def get_due_calendar_weekly(
+    conn,
+    notify_before_minutes
+):
     """
     今日の曜日に該当するweekly予定から、
-    開始時刻を迎えた未通知予定を取得する。
+    開始時刻のN分前を迎えた未通知予定を取得する。
 
     weekday:
         Monday    = 0
@@ -677,8 +807,6 @@ def get_due_calendar_weekly(conn):
         Friday    = 4
         Saturday  = 5
         Sunday    = 6
-
-    MySQL WEEKDAY()も同じ形式。
     """
 
     cursor = conn.cursor(
@@ -709,7 +837,13 @@ def get_due_calendar_weekly(conn):
 
                 AND cw.start_time IS NOT NULL
 
-                AND cw.start_time <= CURTIME()
+                AND TIMESTAMP(
+                    CURDATE(),
+                    cw.start_time
+                ) <= DATE_ADD(
+                    NOW(),
+                    INTERVAL %s MINUTE
+                )
 
                 AND (
                     cw.last_notified_date IS NULL
@@ -720,7 +854,10 @@ def get_due_calendar_weekly(conn):
             ORDER BY
                 cw.start_time ASC,
                 cw.id ASC
-            """
+            """,
+            (
+                notify_before_minutes,
+            )
         )
 
         return cursor.fetchall()
@@ -733,12 +870,6 @@ def mark_calendar_weekly_notified(
     conn,
     schedule_id
 ):
-    """
-    weekly予定を今日通知済みにする。
-
-    Slack通知成功後に呼び出す。
-    """
-
     cursor = conn.cursor()
 
     try:
@@ -773,11 +904,10 @@ def mark_calendar_weekly_notified(
         cursor.close()
 
 
-def build_calendar_weekly_message(schedule):
-    """
-    weekly予定のSlack通知本文。
-    """
-
+def build_calendar_weekly_message(
+    schedule,
+    notify_before_minutes
+):
     message = (
         "[アヴェリア 予定通知]\n"
         f"{schedule['title']}\n"
@@ -800,26 +930,22 @@ def build_calendar_weekly_message(schedule):
             f"{schedule['end_time']}"
         )
 
+    message += (
+        f"\n{notify_before_minutes}分前通知"
+    )
+
     return message
 
 
-def process_calendar_weekly():
-    """
-    今日のweekly予定を通知する。
-
-    Slack送信成功後だけ
-    last_notified_dateを今日の日付へ更新する。
-
-    Slack送信に失敗した場合は
-    last_notified_dateを更新しないため、
-    次回チェック時に再試行される。
-    """
-
+def process_calendar_weekly(
+    notify_before_minutes
+):
     conn = get_connection()
 
     try:
         schedules = get_due_calendar_weekly(
-            conn
+            conn,
+            notify_before_minutes
         )
 
         for schedule in schedules:
@@ -827,7 +953,8 @@ def process_calendar_weekly():
             try:
                 message = (
                     build_calendar_weekly_message(
-                        schedule
+                        schedule,
+                        notify_before_minutes
                     )
                 )
 
@@ -865,7 +992,7 @@ def process_calendar_weekly():
 
 
 # =========================================================
-# Main loop
+# Main
 # =========================================================
 
 def run():
@@ -873,23 +1000,39 @@ def run():
     Aveliaスケジュール通知サービス。
     """
 
+    # schedulesテーブル確認
     init_table()
+
+    # SCHEDULER設定がなければ自動追加
+    ensure_scheduler_settings()
+
+    # 起動時に設定を読み込む
+    check_interval = load_scheduler_interval()
 
     print(
         "[Avelia Schedule] "
         "通知サービス開始 "
-        f"(interval={CHECK_INTERVAL}s)",
+        f"(interval={check_interval}s)",
         flush=True
     )
 
     while True:
+
+        # 毎ループ読み直す。
+        # DBを書き換えればサービス再起動なしで
+        # 通知時間を変更できる。
+        notify_before_minutes = (
+            load_notify_before_minutes()
+        )
 
         # -----------------------------
         # schedules
         # -----------------------------
 
         try:
-            process_schedules()
+            process_schedules(
+                notify_before_minutes
+            )
 
         except Exception as e:
             print(
@@ -904,7 +1047,9 @@ def run():
         # -----------------------------
 
         try:
-            process_calendar_once()
+            process_calendar_once(
+                notify_before_minutes
+            )
 
         except Exception as e:
             print(
@@ -919,7 +1064,9 @@ def run():
         # -----------------------------
 
         try:
-            process_calendar_weekly()
+            process_calendar_weekly(
+                notify_before_minutes
+            )
 
         except Exception as e:
             print(
@@ -930,7 +1077,7 @@ def run():
             )
 
         time.sleep(
-            CHECK_INTERVAL
+            check_interval
         )
 
 
