@@ -6,3 +6,4 @@ dropbox
 pyttsx3
 python-dotenv
 reportlab
+pypdf

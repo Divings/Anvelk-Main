@@ -12,6 +12,10 @@ import shutil
 import pyfiglet
 import traceback
 import time
+from pack.pdf_reader import (
+    read_pdf,
+    get_pdf_info
+)
 from pack.run_System import run_system_command,block_cmd
 from pack.read_file import read_local_file
 from pack.slack_notify import notify_slack
@@ -3103,6 +3107,62 @@ def _schedule_tools():
     return [
         {
     "type": "function",
+    "name": "read_pdf",
+    "description": (
+        "ローカルに保存されているPDFファイルからテキストを読み取ります。"
+        "PDFの内容確認、要約、分析などを行う場合に使用してください。"
+        "必要に応じて読み取るページ範囲を指定できます。"
+    ),
+    "strict": True,
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "pdf_path": {
+                "type": "string",
+                "description": "読み取るPDFファイルのパス"
+            },
+            "start_page": {
+                "type": ["integer", "null"],
+                "description": "読み取り開始ページ。省略時は1ページ目"
+            },
+            "end_page": {
+                "type": ["integer", "null"],
+                "description": "読み取り終了ページ。省略時は最終ページ"
+            }
+        },
+        "required": [
+            "pdf_path",
+            "start_page",
+            "end_page"
+        ],
+        "additionalProperties": False
+    }
+},
+{
+    "type": "function",
+    "name": "get_pdf_info",
+    "description": (
+        "ローカルに保存されているPDFファイルの基本情報を取得します。"
+        "ページ数、ファイルサイズ、タイトル、作成者などを確認する場合に"
+        "使用してください。PDF本文は読み取りません。"
+    ),
+    "strict": True,
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "pdf_path": {
+                "type": "string",
+                "description": "情報を取得するPDFファイルのパス"
+            }
+        },
+        "required": [
+            "pdf_path"
+        ],
+        "additionalProperties": False
+    }
+},
+        {
+    "type": "function",
     "name": "create_pdf",
     "description": (
         "ユーザーが指定した内容をPDFファイルとして作成します。"
@@ -3950,6 +4010,23 @@ def _json_safe_schedule_rows(rows):
 def execute_avelia_tool(tool_name, arguments):
     """OpenAIから要求されたローカルToolを実行する。"""
     TASK_DB_CONFIG = load_database_config()
+    if tool_name == "read_pdf":
+
+        return read_pdf(
+            pdf_path=arguments["pdf_path"],
+            start_page=(
+                arguments.get("start_page")
+                if arguments.get("start_page") is not None
+                else 1
+            ),
+            end_page=arguments.get("end_page")
+        )
+
+    if tool_name == "get_pdf_info":
+
+        return get_pdf_info(
+            pdf_path=arguments["pdf_path"]
+        )
     if tool_name == "create_pdf":
 
         title = arguments["title"]
