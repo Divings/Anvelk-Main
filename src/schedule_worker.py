@@ -8,14 +8,22 @@ import time
 import mysql.connector
 import requests
 
+
+# =========================================================
+# Config
+# =========================================================
+
+DATABASE_CONF = "/opt/Anvelk-Mainframe/config/database.conf"
+
+
 # =========================================================
 # Database
 # =========================================================
 
 def load_database_config():
     """
-    /opt/config/database.conf から
-    MySQL/MariaDB 接続情報を取得する。
+    /opt/Anvelk-Mainframe/config/database.conf から
+    MySQL/MariaDB接続情報を取得する。
 
     想定形式:
 
@@ -97,12 +105,23 @@ def load_database_config():
         "autocommit": False,
     }
 
+
 def get_connection():
     return mysql.connector.connect(
         **load_database_config()
     )
 
+
 def load_scheduler_interval():
+    """
+    settingsテーブルから
+    スケジュール確認間隔を取得する。
+
+    SCHEDULER / check_interval
+
+    未設定・不正値の場合は30秒。
+    """
+
     conn = get_connection()
     cursor = conn.cursor()
 
@@ -115,7 +134,10 @@ def load_scheduler_interval():
               AND setting_key = %s
             LIMIT 1
             """,
-            ("SCHEDULER", "check_interval"),
+            (
+                "SCHEDULER",
+                "check_interval",
+            )
         )
 
         row = cursor.fetchone()
@@ -125,6 +147,7 @@ def load_scheduler_interval():
 
         try:
             value = int(row[0])
+
         except (TypeError, ValueError):
             return 30
 
@@ -137,13 +160,8 @@ def load_scheduler_interval():
         cursor.close()
         conn.close()
 
-DATABASE_CONF = "/opt/Anvelk-Mainframe/config/database.conf"
-CHECK_INTERVAL = load_scheduler_interval()
 
-def get_connection():
-    return mysql.connector.connect(
-        **load_database_config()
-    )
+CHECK_INTERVAL = load_scheduler_interval()
 
 
 # =========================================================
@@ -152,13 +170,13 @@ def get_connection():
 
 def load_slack_webhook_url(conn):
     """
-    Slack Webhook URL を取得する。
+    Slack Webhook URLを取得する。
 
     優先順位:
-    1. 環境変数 SLACK_WEBHOOK_URL
-    2. settings テーブル
-       section_name = SLACK
-       setting_key  = webhook_url
+        1. 環境変数 SLACK_WEBHOOK_URL
+        2. settingsテーブル
+           section_name = SLACK
+           setting_key  = webhook_url
     """
 
     env_url = os.getenv(
@@ -217,8 +235,7 @@ def notify_slack(
     """
     Slack Incoming Webhookへ通知する。
 
-    HTTP 2xx以外、通信エラーは例外にする。
-    例外時は呼び出し側で message_use を更新しない。
+    HTTP 2xx以外または通信エラーの場合は例外にする。
     """
 
     webhook_url = load_slack_webhook_url(
@@ -252,12 +269,12 @@ def notify_slack(
 
 
 # =========================================================
-# Schedule table
+# schedules
 # =========================================================
 
 def init_table():
     """
-    schedules テーブルが存在しない場合は作成する。
+    schedulesテーブルが存在しない場合は作成する。
     """
 
     conn = get_connection()
@@ -311,7 +328,7 @@ def init_table():
 
 def get_due_messages(conn):
     """
-    現在時刻までに通知予定時刻を迎えた
+    現在時刻までに通知時刻を迎えた
     未通知メッセージを取得する。
     """
 
@@ -352,8 +369,7 @@ def mark_message_used(
     message_id
 ):
     """
-    通知済みのスケジュールを
-    message_use = 1 に更新する。
+    schedulesの通知を使用済みにする。
     """
 
     cursor = conn.cursor()
@@ -362,9 +378,13 @@ def mark_message_used(
         cursor.execute(
             """
             UPDATE schedules
-            SET message_use = 1
-            WHERE id = %s
-              AND message_use = 0
+
+            SET
+                message_use = 1
+
+            WHERE
+                id = %s
+                AND message_use = 0
             """,
             (
                 message_id,
@@ -381,13 +401,9 @@ def mark_message_used(
         cursor.close()
 
 
-# =========================================================
-# Schedule notification
-# =========================================================
-
 def build_message(schedule):
     """
-    Slackへ送る本文を生成する。
+    schedules用Slack通知本文。
     """
 
     return (
@@ -401,8 +417,10 @@ def build_message(schedule):
 
 def process_schedules():
     """
-    通知対象を取得し、
-    Slack送信成功後に message_use を1へ更新する。
+    schedulesの通知処理。
+
+    Slack送信成功後だけ
+    message_use = 1 にする。
     """
 
     conn = get_connection()
@@ -424,7 +442,6 @@ def process_schedules():
                     message
                 )
 
-                # Slack通知成功後だけ使用済みにする。
                 mark_message_used(
                     conn,
                     schedule["id"]
@@ -454,19 +471,422 @@ def process_schedules():
 
 
 # =========================================================
+# calendar_once
+# =========================================================
+
+def get_due_calendar_once(conn):
+    """
+    開始時刻を迎えた単発予定のうち、
+    まだ通知していない予定を取得する。
+
+    サービス停止中に予定時刻を過ぎても、
+    復旧後の最初のチェックで取得される。
+    """
+
+    cursor = conn.cursor(
+        dictionary=True
+    )
+
+    try:
+        cursor.execute(
+            """
+            SELECT
+                id,
+                title,
+                description,
+                scheduled_date,
+                start_time,
+                end_time,
+                notified
+
+            FROM calendar_once
+
+            WHERE
+                completed = 0
+
+                AND notified = 0
+
+                AND start_time IS NOT NULL
+
+                AND TIMESTAMP(
+                    scheduled_date,
+                    start_time
+                ) <= NOW()
+
+            ORDER BY
+                scheduled_date ASC,
+                start_time ASC,
+                id ASC
+            """
+        )
+
+        return cursor.fetchall()
+
+    finally:
+        cursor.close()
+
+
+def mark_calendar_once_notified(
+    conn,
+    schedule_id
+):
+    """
+    単発予定を通知済みにする。
+
+    Slack通知成功後に呼び出す。
+    """
+
+    cursor = conn.cursor()
+
+    try:
+        cursor.execute(
+            """
+            UPDATE calendar_once
+
+            SET
+                notified = 1
+
+            WHERE
+                id = %s
+                AND notified = 0
+            """,
+            (
+                schedule_id,
+            )
+        )
+
+        if cursor.rowcount != 1:
+            raise RuntimeError(
+                "単発予定の通知済み更新に失敗しました。"
+                f" ID={schedule_id}"
+            )
+
+    finally:
+        cursor.close()
+
+
+def build_calendar_once_message(schedule):
+    """
+    単発予定のSlack通知本文。
+    """
+
+    message = (
+        "[アヴェリア 予定通知]\n"
+        f"{schedule['title']}\n"
+    )
+
+    if schedule.get("description"):
+        message += (
+            "\n"
+            f"{schedule['description']}\n"
+        )
+
+    message += (
+        "\n日付: "
+        f"{schedule['scheduled_date']}"
+    )
+
+    message += (
+        "\n開始時刻: "
+        f"{schedule['start_time']}"
+    )
+
+    if schedule.get("end_time"):
+        message += (
+            "\n終了時刻: "
+            f"{schedule['end_time']}"
+        )
+
+    return message
+
+
+def process_calendar_once():
+    """
+    単発予定を通知する。
+
+    Slack送信成功後だけ notified = 1 にする。
+
+    Slack送信に失敗した場合は
+    notified = 0 のままなので、
+    次回チェック時に再試行される。
+    """
+
+    conn = get_connection()
+
+    try:
+        schedules = get_due_calendar_once(
+            conn
+        )
+
+        for schedule in schedules:
+
+            try:
+                message = (
+                    build_calendar_once_message(
+                        schedule
+                    )
+                )
+
+                notify_slack(
+                    conn,
+                    message
+                )
+
+                mark_calendar_once_notified(
+                    conn,
+                    schedule["id"]
+                )
+
+                conn.commit()
+
+                print(
+                    "[Calendar Once] 通知完了 "
+                    f"ID={schedule['id']} "
+                    f"title={schedule['title']}",
+                    flush=True
+                )
+
+            except Exception as e:
+                conn.rollback()
+
+                print(
+                    "[Calendar Once] 通知失敗 "
+                    f"ID={schedule['id']} "
+                    f"{type(e).__name__}: {e}",
+                    flush=True
+                )
+
+    finally:
+        conn.close()
+
+
+# =========================================================
+# calendar_weekly
+# =========================================================
+
+def get_due_calendar_weekly(conn):
+    """
+    今日の曜日に該当するweekly予定から、
+    開始時刻を迎えた未通知予定を取得する。
+
+    weekday:
+        Monday    = 0
+        Tuesday   = 1
+        Wednesday = 2
+        Thursday  = 3
+        Friday    = 4
+        Saturday  = 5
+        Sunday    = 6
+
+    MySQL WEEKDAY()も同じ形式。
+    """
+
+    cursor = conn.cursor(
+        dictionary=True
+    )
+
+    try:
+        cursor.execute(
+            """
+            SELECT
+                cw.id,
+                cw.title,
+                cw.description,
+                cw.start_time,
+                cw.end_time,
+                cw.last_notified_date
+
+            FROM calendar_weekly AS cw
+
+            INNER JOIN calendar_weekly_days AS cwd
+                ON cw.id = cwd.schedule_id
+
+            WHERE
+                cw.enabled = 1
+
+                AND cwd.weekday =
+                    WEEKDAY(CURDATE())
+
+                AND cw.start_time IS NOT NULL
+
+                AND cw.start_time <= CURTIME()
+
+                AND (
+                    cw.last_notified_date IS NULL
+                    OR
+                    cw.last_notified_date <> CURDATE()
+                )
+
+            ORDER BY
+                cw.start_time ASC,
+                cw.id ASC
+            """
+        )
+
+        return cursor.fetchall()
+
+    finally:
+        cursor.close()
+
+
+def mark_calendar_weekly_notified(
+    conn,
+    schedule_id
+):
+    """
+    weekly予定を今日通知済みにする。
+
+    Slack通知成功後に呼び出す。
+    """
+
+    cursor = conn.cursor()
+
+    try:
+        cursor.execute(
+            """
+            UPDATE calendar_weekly
+
+            SET
+                last_notified_date = CURDATE()
+
+            WHERE
+                id = %s
+
+                AND (
+                    last_notified_date IS NULL
+                    OR
+                    last_notified_date <> CURDATE()
+                )
+            """,
+            (
+                schedule_id,
+            )
+        )
+
+        if cursor.rowcount != 1:
+            raise RuntimeError(
+                "weekly予定の通知済み更新に失敗しました。"
+                f" ID={schedule_id}"
+            )
+
+    finally:
+        cursor.close()
+
+
+def build_calendar_weekly_message(schedule):
+    """
+    weekly予定のSlack通知本文。
+    """
+
+    message = (
+        "[アヴェリア 予定通知]\n"
+        f"{schedule['title']}\n"
+    )
+
+    if schedule.get("description"):
+        message += (
+            "\n"
+            f"{schedule['description']}\n"
+        )
+
+    message += (
+        "\n開始時刻: "
+        f"{schedule['start_time']}"
+    )
+
+    if schedule.get("end_time"):
+        message += (
+            "\n終了時刻: "
+            f"{schedule['end_time']}"
+        )
+
+    return message
+
+
+def process_calendar_weekly():
+    """
+    今日のweekly予定を通知する。
+
+    Slack送信成功後だけ
+    last_notified_dateを今日の日付へ更新する。
+
+    Slack送信に失敗した場合は
+    last_notified_dateを更新しないため、
+    次回チェック時に再試行される。
+    """
+
+    conn = get_connection()
+
+    try:
+        schedules = get_due_calendar_weekly(
+            conn
+        )
+
+        for schedule in schedules:
+
+            try:
+                message = (
+                    build_calendar_weekly_message(
+                        schedule
+                    )
+                )
+
+                notify_slack(
+                    conn,
+                    message
+                )
+
+                mark_calendar_weekly_notified(
+                    conn,
+                    schedule["id"]
+                )
+
+                conn.commit()
+
+                print(
+                    "[Calendar Weekly] 通知完了 "
+                    f"ID={schedule['id']} "
+                    f"title={schedule['title']}",
+                    flush=True
+                )
+
+            except Exception as e:
+                conn.rollback()
+
+                print(
+                    "[Calendar Weekly] 通知失敗 "
+                    f"ID={schedule['id']} "
+                    f"{type(e).__name__}: {e}",
+                    flush=True
+                )
+
+    finally:
+        conn.close()
+
+
+# =========================================================
 # Main loop
 # =========================================================
 
 def run():
+    """
+    Aveliaスケジュール通知サービス。
+    """
+
     init_table()
 
     print(
         "[Avelia Schedule] "
-        "通知サービス開始",
+        "通知サービス開始 "
+        f"(interval={CHECK_INTERVAL}s)",
         flush=True
     )
 
     while True:
+
+        # -----------------------------
+        # schedules
+        # -----------------------------
 
         try:
             process_schedules()
@@ -474,6 +894,37 @@ def run():
         except Exception as e:
             print(
                 "[Avelia Schedule] "
+                "schedules処理エラー "
+                f"{type(e).__name__}: {e}",
+                flush=True
+            )
+
+        # -----------------------------
+        # calendar_once
+        # -----------------------------
+
+        try:
+            process_calendar_once()
+
+        except Exception as e:
+            print(
+                "[Avelia Schedule] "
+                "calendar_once処理エラー "
+                f"{type(e).__name__}: {e}",
+                flush=True
+            )
+
+        # -----------------------------
+        # calendar_weekly
+        # -----------------------------
+
+        try:
+            process_calendar_weekly()
+
+        except Exception as e:
+            print(
+                "[Avelia Schedule] "
+                "calendar_weekly処理エラー "
                 f"{type(e).__name__}: {e}",
                 flush=True
             )
