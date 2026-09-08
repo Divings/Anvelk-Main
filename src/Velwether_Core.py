@@ -16,6 +16,10 @@ from pack.run_System import run_system_command,block_cmd
 from pack.read_file import read_local_file
 from pack.slack_notify import notify_slack
 from pack.write_file import write_local_file
+from pack.schedule_pdf import (
+    tool_create_schedule_pdf,
+    tool_create_general_pdf
+)
 from pack.task_tools import (
     add_one_shot_task,
     add_weekly_task,
@@ -3099,6 +3103,67 @@ def _schedule_tools():
     return [
         {
     "type": "function",
+    "name": "create_pdf",
+    "description": (
+        "ユーザーが指定した内容をPDFファイルとして作成します。"
+        "予定表専用ではなく、文章、レポート、説明資料、"
+        "一覧、表などをPDFとして保存したい場合に使用してください。"
+        "ユーザーが今日の予定をPDF化したい場合は、"
+        "create_today_schedule_pdfを優先してください。"
+    ),
+    "strict": True,
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "title": {
+                "type": "string",
+                "description": "PDFのタイトル"
+            },
+            "content": {
+                "type": "string",
+                "description": "PDF本文。プレーンテキストで指定する"
+            },
+            "filename": {
+                "type": [
+                    "string",
+                    "null"
+                ],
+                "description": (
+                    "出力ファイル名。"
+                    "指定がなければ自動生成する。"
+                    "拡張子.pdfは省略可能"
+                )
+            }
+        },
+        "required": [
+            "title",
+            "content",
+            "filename"
+        ],
+        "additionalProperties": False
+    }
+},
+
+    {
+    "type": "function",
+    "name": "create_today_schedule_pdf",
+    "description": (
+        "今日の予定をPDFファイルとして出力します。"
+        "ユーザーが『今日の予定をPDFにして』"
+        "『今日のスケジュールをPDF出力して』など、"
+        "今日の予定のPDF生成を依頼した場合に使用してください。"
+        "出力先はユーザーのホームディレクトリ内のout_pdfです。"
+    ),
+    "strict": True,
+    "parameters": {
+        "type": "object",
+        "properties": {},
+        "required": [],
+        "additionalProperties": False
+    }
+},
+        {
+    "type": "function",
     "name": "send_slack_notification",
     "description": (
         "Slackへ通知メッセージを送信します。"
@@ -3885,6 +3950,22 @@ def _json_safe_schedule_rows(rows):
 def execute_avelia_tool(tool_name, arguments):
     """OpenAIから要求されたローカルToolを実行する。"""
     TASK_DB_CONFIG = load_database_config()
+    if tool_name == "create_pdf":
+
+        title = arguments["title"]
+        content = arguments["content"]
+        filename = arguments.get("filename")
+
+        return tool_create_general_pdf(
+            title=title,
+            content=content,
+            filename=filename
+        )
+    if tool_name == "create_today_schedule_pdf":
+
+        result = tool_create_schedule_pdf()
+
+        return result
     if tool_name == "add_one_shot_task":
 
         return add_one_shot_task(
