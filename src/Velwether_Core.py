@@ -4768,7 +4768,8 @@ def main():
 
                 elif role == "assistant":
                     print("")
-                    print(f" {BOT_NAME}: {content}")
+                    console.print(f" {BOT_NAME}:")
+                    console.print(Markdown(display_response))
 
             print("")
             print(" ====================")
