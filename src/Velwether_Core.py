@@ -54,6 +54,10 @@ from pack.knowledge import (
     get_knowledge_context
 )
 from pack.Auth import authorize_environment
+from rich.console import Console
+from rich.markdown import Markdown
+
+console = Console()
 
 import uuid
 
@@ -4860,15 +4864,11 @@ def main():
             "。\n "
         )
         
-        display_response = display_response.replace(
-                    "**",
-                    ""
-                )
 
         print("")
-        print(
-            f" {BOT_NAME}: {display_response}"
-        )
+        console.print(f" {BOT_NAME}:")
+        console.print(Markdown(display_response))
+
         if VOICE_ENABLD == 1 and engine is not None:
             engine.say(display_response)
             engine.runAndWait()
