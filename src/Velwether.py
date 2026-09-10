@@ -57,6 +57,13 @@ if not auth_result["ok"]:
 
     raise SystemExit(1)
 
+a = BarcodeAuthGuard()
+if a == False:
+    print("")
+    print(" アヴェリアを起動できません。")
+    print(f" 理由: バーコード認証に失敗しました。")
+    sys.exit(1)
+
 try:
     Velwether_Core.main()
 except Exception as e:
