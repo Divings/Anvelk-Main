@@ -24,6 +24,7 @@ from pack.schedule_pdf import (
     tool_create_schedule_pdf,
     tool_create_general_pdf
 )
+from pack.file_Sort import sort_file_by_importance
 from pack.OCR_read import ocr_image
 from pack.task_tools import (
     add_one_shot_task,
@@ -3117,6 +3118,11 @@ def _schedule_tools():
         "画像内の日本語・英語テキストを抽出します。"
         "画像に書かれている文章、文字、帳票、スクリーンショットなどを"
         "読み取る必要がある場合に使用してください。"
+        "OCRで読み取った内容から重要度を判断できる場合は、"
+        "Normal、Important、Critical のいずれかへの"
+        "フォルダ割り振りをユーザーに提案してください。"
+        "ユーザーが明示的に許可または指示するまでは、"
+        "ファイルを移動してはいけません。"
     ),
     "strict": True,
     "parameters": {
@@ -3132,6 +3138,45 @@ def _schedule_tools():
         },
         "required": [
             "image_path"
+        ],
+        "additionalProperties": False
+    }
+},{
+    "type": "function",
+    "name": "sort_file_by_importance",
+    "description": (
+        "ファイルを重要度に応じて /mnt/Folders 内の分類フォルダへ移動します。"
+        "Normal は通常の文書、Important は重要な文書、"
+        "Critical は最重要の文書です。"
+        "OCRなどで内容を確認し、ユーザーがファイルの分類を"
+        "明示的に許可または指示した場合のみ使用してください。"
+    ),
+    "strict": True,
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "file_path": {
+                "type": "string",
+                "description": "分類して移動するファイルのパス"
+            },
+            "importance": {
+                "type": "string",
+                "enum": [
+                    "normal",
+                    "important",
+                    "critical"
+                ],
+                "description": (
+                    "分類先の重要度。"
+                    "normal=Normal、"
+                    "important=Important、"
+                    "critical=Critical"
+                )
+            }
+        },
+        "required": [
+            "file_path",
+            "importance"
         ],
         "additionalProperties": False
     }
@@ -4042,6 +4087,12 @@ def _json_safe_schedule_rows(rows):
 def execute_avelia_tool(tool_name, arguments):
     """OpenAIから要求されたローカルToolを実行する。"""
     TASK_DB_CONFIG = load_database_config()
+    if tool_name == "sort_file_by_importance":
+
+        return sort_file_by_importance(
+            file_path=arguments["file_path"],
+            importance=arguments["importance"]
+        )
     if tool_name == "ocr_image":
 
         return ocr_image(
