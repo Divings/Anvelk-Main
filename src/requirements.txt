@@ -8,3 +8,5 @@ python-dotenv
 reportlab
 pypdf
 rich
+pytesseract
+pillow

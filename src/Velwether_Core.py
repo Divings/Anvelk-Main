@@ -24,6 +24,7 @@ from pack.schedule_pdf import (
     tool_create_schedule_pdf,
     tool_create_general_pdf
 )
+from pack.OCR_read import ocr_image
 from pack.task_tools import (
     add_one_shot_task,
     add_weekly_task,
@@ -3108,7 +3109,33 @@ def chat_with_openai_web_search(messages):
 
 def _schedule_tools():
     """通常会話でアヴェリアに公開するResponses API用Tool。"""
-    return [
+    return [{
+    "type": "function",
+    "name": "ocr_image",
+    "description": (
+        "ローカルに保存されている画像ファイルをOCRで読み取り、"
+        "画像内の日本語・英語テキストを抽出します。"
+        "画像に書かれている文章、文字、帳票、スクリーンショットなどを"
+        "読み取る必要がある場合に使用してください。"
+    ),
+    "strict": True,
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "image_path": {
+                "type": "string",
+                "description": (
+                    "OCRで読み取る画像ファイルのパス。"
+                    "PNG、JPEGなどの画像ファイルを指定します。"
+                )
+            }
+        },
+        "required": [
+            "image_path"
+        ],
+        "additionalProperties": False
+    }
+},
         {
     "type": "function",
     "name": "read_pdf",
@@ -4015,6 +4042,11 @@ def _json_safe_schedule_rows(rows):
 def execute_avelia_tool(tool_name, arguments):
     """OpenAIから要求されたローカルToolを実行する。"""
     TASK_DB_CONFIG = load_database_config()
+    if tool_name == "ocr_image":
+
+        return ocr_image(
+            image_path=arguments["image_path"]
+        )
     if tool_name == "read_pdf":
 
         return read_pdf(
