@@ -2,7 +2,7 @@ import Velwether_Core
 import traceback
 import sys
 from  pack.Auth import *
-
+import time
 
 sys.stdin.reconfigure(
     encoding="utf-8",
@@ -57,7 +57,13 @@ if not auth_result["ok"]:
 
     raise SystemExit(1)
 
-a = BarcodeAuthGuard()
+try:
+    a = BarcodeAuthGuard()
+except KeyboardInterrupt:
+    print("")
+    print(" バーコード認証をキャンセルしました。")
+    time.sleep(2)
+    sys.exit(1)
 if a == False:
     print("")
     print(" アヴェリアを起動できません。")
