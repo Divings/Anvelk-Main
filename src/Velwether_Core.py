@@ -174,6 +174,9 @@ def get_db_connection():
 
     return mysql.connector.connect(**db_config)
 
+card_id = ""
+real_name = ""
+last_login = ""
 
 # =========================================================
 # スケジュール管理
@@ -2046,11 +2049,19 @@ def load_system_prompt():
         sys_msg=""
     else:
         session_msg="現在、セッションエラーはありません"
+    if real_name=="":
+        real_name="ユーザー"
+    if last_login=="":
+        last_login="不明"
     return (
         f"あなたの名前は「{bot_name}」です。"
         f"ユーザーはあなたを「{bot_name}」として扱います。"
         f"自分自身について話すときも、その名前と人格設定を維持してください。"
         f"{base_prompt}"
+        f"ユーザーの名前は「{real_name}」です。"
+        f"ユーザーはあなたに対して敬語を使うことがあります。"
+        f"ユーザーの名前を呼ぶときは、必ず「{real_name}さん」と呼んでください。"
+        f"最終ログイン日時は{last_login}です。"
         f"現在時刻は{current_date}です。"
         f"{session_msg}"
     )
@@ -4651,10 +4662,14 @@ def chat_with_openai(messages):
 # メイン処理
 # =========================================================
 
-BOT_NAME = load_BotName()
-def main():
-    c=0
 
+BOT_NAME = load_BotName()
+def main(user):
+    c=0
+    global card_id,real_name,last_login
+    card_id = user["card_id"]
+    real_name = user["real_name"]
+    last_login = user["last_login"]
     try:
         print(pyfiglet.figlet_format("Avelia",font="slant"))
         print(" OpenAI API Hybrid Web Search Edition")

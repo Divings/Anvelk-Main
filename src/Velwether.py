@@ -58,7 +58,7 @@ if not auth_result["ok"]:
     raise SystemExit(1)
 
 try:
-    a = BarcodeAuthGuard()
+    a, card = BarcodeAuthGuard()
 except KeyboardInterrupt:
     print("")
     print(" バーコード認証をキャンセルしました。")
@@ -69,9 +69,20 @@ if a == False:
     print(" アヴェリアを起動できません。")
     print(f" 理由: バーコード認証に失敗しました。")
     sys.exit(1)
+else:
+    card_id = card["id"]
+    real_name = get_real_name(card_id)
+    last_login = get_last_login(card_id)
 
+    user = {
+        "card_id": card_id,
+        "real_name": real_name,
+        "last_login": last_login
+    }
+    
 try:
-    Velwether_Core.main()
+    Velwether_Core.main(user)
+    update_last_login(card_id)
 except Exception as e:
     print("")
     print(" 予期せぬエラーが発生しました。")

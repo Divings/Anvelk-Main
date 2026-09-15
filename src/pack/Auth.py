@@ -847,6 +847,162 @@ def BarcodeAuthGuard():
             barcode
         )
 
-        return success
+        return success,card
     else:
         return None
+
+def get_user_login_info(card_id: int):
+    """
+    認証カードに紐づくユーザー情報を取得し、
+    最終ログイン日時を更新する。
+
+    戻り値:
+        {
+            "username": ...,
+            "real_name": ...,
+            "last_login_at": ...
+        }
+
+    last_login_at は更新前の値（前回ログイン日時）。
+    """
+
+    conn = connect_database()
+
+    cursor = conn.cursor(
+        dictionary=True
+    )
+
+    try:
+
+        # ユーザー情報と前回ログイン日時を取得
+        cursor.execute(
+            """
+            SELECT
+                username,
+                real_name,
+                last_login_at
+            FROM auth_cards
+            WHERE id = %s
+              AND enabled = 1
+            LIMIT 1
+            """,
+            (
+                card_id,
+            )
+        )
+
+        user = cursor.fetchone()
+
+        if user is None:
+            return None
+
+        # 今回のログイン日時を保存
+        cursor.execute(
+            """
+            UPDATE auth_cards
+            SET last_login_at = NOW()
+            WHERE id = %s
+            """,
+            (
+                card_id,
+            )
+        )
+
+        conn.commit()
+
+        return user
+
+    except Exception:
+        conn.rollback()
+        raise
+
+    finally:
+        cursor.close()
+        conn.close()
+        
+def get_real_name(card_id: int):
+    conn = connect_database()
+    cursor = conn.cursor()
+
+    try:
+        cursor.execute(
+            """
+            SELECT real_name
+            FROM auth_cards
+            WHERE id = %s
+              AND enabled = 1
+            LIMIT 1
+            """,
+            (card_id,)
+        )
+
+        row = cursor.fetchone()
+
+        if row is None:
+            return None
+
+        return row[0]
+
+    finally:
+        cursor.close()
+        conn.close()
+
+def get_last_login(card_id: int):
+    """
+    最終ログイン日時を取得する。
+    """
+
+    conn = connect_database()
+    cursor = conn.cursor()
+
+    try:
+        cursor.execute(
+            """
+            SELECT last_login_at
+            FROM auth_cards
+            WHERE id = %s
+              AND enabled = 1
+            LIMIT 1
+            """,
+            (card_id,)
+        )
+
+        row = cursor.fetchone()
+
+        if row is None:
+            return None
+
+        return row[0]
+
+    finally:
+        cursor.close()
+        conn.close()
+
+def update_last_login(card_id: int):
+    """
+    最終ログイン日時を現在時刻へ更新する。
+    """
+
+    conn = connect_database()
+    cursor = conn.cursor()
+
+    try:
+        cursor.execute(
+            """
+            UPDATE auth_cards
+            SET last_login_at = NOW()
+            WHERE id = %s
+              AND enabled = 1
+            """,
+            (card_id,)
+        )
+
+        conn.commit()
+
+    except Exception:
+        conn.rollback()
+        raise
+
+    finally:
+        cursor.close()
+        conn.close()
