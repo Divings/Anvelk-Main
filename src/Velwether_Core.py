@@ -2031,7 +2031,8 @@ def load_token():
 from datetime import datetime
 
 def load_system_prompt():
-    global sys_msg
+    global sys_msg, real_name, last_login
+
     bot_name = load_BotName()
 
     try:
