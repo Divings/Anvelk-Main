@@ -3168,7 +3168,16 @@ def _exec_ensec_rsa(arguments):
     output = Path(str(target) + ".rdec") if mode == 0 else Path(str(target)[:-5])
     if output.exists() or output.is_symlink():
         return {"success": False, "error": "output_already_exists"}
-    command = shutil.which("ensec")
+    # Services may launch the venv Python directly without adding its bin to PATH.
+    executable = Path(sys.executable)
+    candidates = [executable.with_name("ensec.exe" if os.name == "nt" else "ensec")]
+    if os.name == "nt":
+        candidates.append(executable.parent / "Scripts" / "ensec.exe")
+    else:
+        candidates.append(Path.home() / ".local" / "bin" / "ensec")
+    command = next((str(path) for path in candidates if path.is_file()), None)
+    if command is None:
+        command = shutil.which("ensec")
     if command is None:
         return {"success": False, "error": "ensec_not_found"}
     try:
