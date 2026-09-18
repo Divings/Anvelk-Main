@@ -49,7 +49,8 @@ from pack.hash_utils import sha256_file
 from pack import file_signature
 from pack.keyword_learning import (
     learn_from_conversation,
-    learning_enabled
+    learning_enabled,
+    load_learning_config
 )
 
 from pack.knowledge import (
@@ -81,6 +82,11 @@ else:
     sys_msg=""
 
 
+learned = load_learning_config()
+if learned["enabled"] == True:
+    learning_enabled_keyword = True
+else:
+    learning_enabled_keyword = False
 Create_session(process_uuid)
 try:
     init_knowledge_table()
@@ -2064,6 +2070,7 @@ def load_system_prompt():
         f"ユーザーはあなたに対して敬語を使うことがあります。"
         f"ユーザーの名前を呼ぶときは、必ず「{real_name}さん」と呼んでください。"
         f"最終ログイン日時は{last_login}です。"
+        f"学習機能は{('有効' if learning_enabled_keyword else '無効')} です。"
         f"現在時刻は{current_date}です。"
         f"{session_msg}"
     )
