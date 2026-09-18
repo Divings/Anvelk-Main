@@ -9,6 +9,8 @@ import os
 import sys
 import configparser
 import shutil
+import subprocess
+from pathlib import Path
 import pyfiglet
 import traceback
 import time
@@ -3128,6 +3130,62 @@ def chat_with_openai_web_search(messages):
         return None
 
 
+def _ensec_tools():
+    """RSA file encryption/decryption via the installed ensec CLI."""
+    return [{
+        "type": "function",
+        "name": "ensec_rsa_file",
+        "description": "ENSECのRSAモードでファイルを暗号化または復号する。0=encrypt、1=decrypt。",
+        "strict": True,
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "mode": {"type": "integer", "enum": [0, 1], "description": "0=encrypt、1=decrypt"},
+                "file_path": {"type": "string", "description": "実行ユーザーのホーム配下にある対象ファイルの絶対パス。復号時は.rdecファイル。"},
+            },
+            "required": ["mode", "file_path"],
+            "additionalProperties": False,
+        },
+    }]
+
+
+def _exec_ensec_rsa(arguments):
+    if (not isinstance(arguments, dict) or set(arguments) != {"mode", "file_path"}
+            or type(arguments["mode"]) is not int or arguments["mode"] not in (0, 1)
+            or not isinstance(arguments["file_path"], str) or not arguments["file_path"]):
+        return {"success": False, "error": "invalid_arguments"}
+
+    mode = arguments["mode"]
+    supplied = Path(arguments["file_path"])
+    if not supplied.is_absolute():
+        return {"success": False, "error": "absolute_path_required"}
+    home = Path.home().resolve()
+    target = supplied.resolve()
+    if not target.is_relative_to(home) or not target.is_file():
+        return {"success": False, "error": "file_must_be_regular_and_inside_home"}
+    if mode == 1 and target.suffix != ".rdec":
+        return {"success": False, "error": "rdec_file_required"}
+    output = Path(str(target) + ".rdec") if mode == 0 else Path(str(target)[:-5])
+    if output.exists() or output.is_symlink():
+        return {"success": False, "error": "output_already_exists"}
+    command = shutil.which("ensec")
+    if command is None:
+        return {"success": False, "error": "ensec_not_found"}
+    try:
+        result = subprocess.run(
+            [command, "encrypt" if mode == 0 else "decrypt", str(target), "--rsa"],
+            capture_output=True, text=True, timeout=300, stdin=subprocess.DEVNULL,
+        )
+    except subprocess.TimeoutExpired:
+        return {"success": False, "error": "ensec_timeout"}
+    except OSError as error:
+        return {"success": False, "error": type(error).__name__}
+    if result.returncode != 0 or not output.is_file():
+        return {"success": False, "error": "ensec_failed", "returncode": result.returncode,
+                "message": (result.stderr or result.stdout)[-1000:]}
+    return {"success": True, "mode": mode, "output_path": str(output)}
+
+
 def _schedule_tools():
     """通常会話でアヴェリアに公開するResponses API用Tool。"""
     return [{
@@ -4088,7 +4146,7 @@ def _schedule_tools():
             "additionalProperties": False,
         },
     },
-    ] + file_signature.tools()
+    ] + file_signature.tools() + _ensec_tools()
 
 def _json_safe_schedule_rows(rows):
     """DB取得結果をTool応答用JSONへ変換する。"""
@@ -4108,6 +4166,8 @@ def execute_avelia_tool(tool_name, arguments):
     """OpenAIから要求されたローカルToolを実行する。"""
     if tool_name in {tool["name"] for tool in file_signature.tools()}:
         return file_signature.exec(tool_name, arguments)
+    if tool_name == "ensec_rsa_file":
+        return _exec_ensec_rsa(arguments)
 
     TASK_DB_CONFIG = load_database_config()
     if tool_name == "sort_file_by_importance":
