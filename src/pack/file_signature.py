@@ -18,6 +18,7 @@ metadata.jsonには鍵の方式・作成日時・公開鍵指紋を保存する�
 公開鍵は信頼できる経路で受け取ること。署名は内容のみを対象とし、
 ファイル名・パス・所有者・作成日時は保証しない。秘密鍵は共有しない。
 出力は既存の write_file と同様にホーム配下に限定し、上書きしない。
+標準の秘密鍵がない場合は最初の署名時に鍵一式を生成する。
 相対パスは実行ユーザーのホームを基準に解決する。
 """
 
@@ -98,9 +99,12 @@ def _pss():
     return padding.PSS(mgf=padding.MGF1(hashes.SHA256()), salt_length=32)
 
 
-def _error(error):
+def _error(error, stage=None):
     # 鍵内容やライブラリ例外の詳細を結果へ混入させない。
-    return {'success': False, 'error': type(error).__name__}
+    result = {'success': False, 'error': type(error).__name__}
+    if stage is not None:
+        result['stage'] = stage
+    return result
 
 
 def keystore_paths():
@@ -177,20 +181,36 @@ def generate_signing_keys():
 
 def sign_file(file_path, private_key_path=None, signature_path=None):
     """通常ファイルを署名し、署名バイト列を別ファイルへ保存する。"""
+    stage = 'signature_path'
     try:
         target = _output_path(signature_path)
+        stage = 'file_path'
+        digest = _read_file(file_path)
+        stage = 'private_key_path'
+        if private_key_path is None:
+            private_key_path = keystore_paths()['private_key_path']
+            if not os.path.lexists(private_key_path):
+                initialized = generate_signing_keys()
+                if not initialized['success']:
+                    return {
+                        'success': False,
+                        'error': 'signing_key_initialization_failed',
+                        'cause': initialized['error'],
+                        'stage': stage,
+                    }
         key = serialization.load_pem_private_key(
-            _read_file(private_key_path or keystore_paths()['private_key_path'], 64 * 1024), password=None,
+            _read_file(private_key_path, 64 * 1024), password=None,
         )
         if not isinstance(key, rsa.RSAPrivateKey) or key.key_size < 2048:
-            return {'success': False, 'error': 'rsa_key_at_least_2048_bits_required'}
+            return {'success': False, 'error': 'rsa_key_at_least_2048_bits_required', 'stage': stage}
         signature = key.sign(
-            _read_file(file_path), _pss(), utils.Prehashed(hashes.SHA256()),
+            digest, _pss(), utils.Prehashed(hashes.SHA256()),
         )
+        stage = 'signature_path'
         _write_new(target, signature, 0o644)
         return {'success': True, 'signature_path': str(target)}
     except Exception as error:
-        return _error(error)
+        return _error(error, stage)
 
 
 def verify_file(file_path, public_key_path=None, signature_path=None):
@@ -213,7 +233,7 @@ def verify_file(file_path, public_key_path=None, signature_path=None):
 
 
 def tools():
-    """既存Coreと同形式のTool定義。鍵生成はCLIから明示的に行う。"""
+    """既存Coreと同形式のTool定義。標準鍵は初回署名時に生成する。"""
     definitions = []
     for name, description, key_name in (
         ('sign_file', 'ユーザーが指定した通常ファイルに別ファイルの電子署名を作成します。', 'private_key_path'),
