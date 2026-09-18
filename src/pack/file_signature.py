@@ -18,6 +18,7 @@ metadata.jsonには鍵の方式・作成日時・公開鍵指紋を保存する�
 公開鍵は信頼できる経路で受け取ること。署名は内容のみを対象とし、
 ファイル名・パス・所有者・作成日時は保証しない。秘密鍵は共有しない。
 出力は既存の write_file と同様にホーム配下に限定し、上書きしない。
+相対パスは実行ユーザーのホームを基準に解決する。
 """
 
 import sys
@@ -42,8 +43,21 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding, rsa, utils
 
 
+def _user_home():
+    return Path(pwd.getpwuid(os.getuid()).pw_dir).resolve()
+
+
+def _user_path(path):
+    target = Path(path)
+    if target.parts and target.parts[0] == '~':
+        return _user_home().joinpath(*target.parts[1:])
+    if not target.is_absolute():
+        return _user_home() / target
+    return target
+
+
 def _read_file(path, limit=None):
-    target = Path(path).expanduser()
+    target = _user_path(path)
     fd = os.open(target, os.O_RDONLY | os.O_NONBLOCK)
     with os.fdopen(fd, 'rb') as stream:
         if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
@@ -60,10 +74,10 @@ def _read_file(path, limit=None):
 
 
 def _output_path(path):
-    target = Path(path).expanduser()
+    target = _user_path(path)
     # 最終要素のシンボリックリンクも上書きしない。
     target = target.parent.resolve() / target.name
-    if not target.is_relative_to(Path.home().resolve()):
+    if not target.is_relative_to(_user_home()):
         raise ValueError('output_must_be_inside_home')
     if os.path.lexists(target):
         raise FileExistsError('output_already_exists')
@@ -91,7 +105,7 @@ def _error(error):
 
 def keystore_paths():
     """環境変数HOMEではなく実行ユーザーのホームから鍵のパスを決定。"""
-    root = Path(pwd.getpwuid(os.getuid()).pw_dir) / '.avelia' / 'keystore'
+    root = _user_home() / '.avelia' / 'keystore'
     return {
         'private_key_path': root / 'private' / 'signing_private.pem',
         'public_key_path': root / 'public' / 'signing_public.pem',
