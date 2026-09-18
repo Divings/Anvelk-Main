@@ -46,6 +46,7 @@ from pack.memory_crypto import (
     decrypt_memory
 )
 from pack.hash_utils import sha256_file
+from pack import file_signature
 from pack.keyword_learning import (
     learn_from_conversation,
     learning_enabled
@@ -4080,7 +4081,7 @@ def _schedule_tools():
             "additionalProperties": False,
         },
     },
-    ]
+    ] + file_signature.tools()
 
 def _json_safe_schedule_rows(rows):
     """DB取得結果をTool応答用JSONへ変換する。"""
@@ -4098,6 +4099,9 @@ def _json_safe_schedule_rows(rows):
 
 def execute_avelia_tool(tool_name, arguments):
     """OpenAIから要求されたローカルToolを実行する。"""
+    if tool_name in {tool["name"] for tool in file_signature.tools()}:
+        return file_signature.exec(tool_name, arguments)
+
     TASK_DB_CONFIG = load_database_config()
     if tool_name == "sort_file_by_importance":
 
