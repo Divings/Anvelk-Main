@@ -10,3 +10,4 @@ pypdf
 rich
 pytesseract
 pillow
+ensec-cli
