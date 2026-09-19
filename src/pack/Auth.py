@@ -293,6 +293,21 @@ def hash_barcode(barcode_value: str) -> str:
 # Initialization
 # ============================================================
 
+def _ensure_auth_card_columns(cursor):
+    """既存 auth_cards に必要列が無ければ追加する。"""
+    cursor.execute("SHOW COLUMNS FROM auth_cards")
+    existing_columns = {row[0] for row in cursor.fetchall()}
+    required_columns = {
+        "username": "VARCHAR(64) DEFAULT NULL",
+        "real_name": "VARCHAR(255) DEFAULT NULL",
+        "last_login_at": "DATETIME DEFAULT NULL",
+    }
+    for column_name, column_definition in required_columns.items():
+        if column_name not in existing_columns:
+            cursor.execute(
+                f"ALTER TABLE auth_cards ADD COLUMN {column_name} {column_definition}"
+            )
+
 def initialize_auth_card_system():
     """
     認証カードシステムを初期化する。
@@ -321,6 +336,12 @@ def initialize_auth_card_system():
 
                 card_name VARCHAR(255) DEFAULT NULL,
 
+                username VARCHAR(64) DEFAULT NULL,
+
+                real_name VARCHAR(255) DEFAULT NULL,
+
+                last_login_at DATETIME DEFAULT NULL,
+
                 enabled TINYINT(1) NOT NULL DEFAULT 1,
 
                 created_at DATETIME NOT NULL
@@ -341,6 +362,8 @@ def initialize_auth_card_system():
               COLLATE=utf8mb4_unicode_ci
             """
         )
+
+        _ensure_auth_card_columns(cursor)
 
         # ----------------------------------------------------
         # settings 初期値
@@ -555,6 +578,9 @@ def get_auth_card(
             SELECT
                 id,
                 card_name,
+                username,
+                real_name,
+                last_login_at,
                 enabled
             FROM auth_cards
             WHERE barcode_hash = %s
@@ -580,7 +606,8 @@ def authenticate_card(
     認証カードによる認証を行う。
 
     システム無効:
-        (False, None)
+        (True, None)
+        ※ 認証不要なので起動を許可する。
 
     未登録・無効カード:
         (False, None)
@@ -590,7 +617,7 @@ def authenticate_card(
     """
 
     if not is_auth_card_system_enabled():
-        return False, None
+        return True, None
 
     card = get_auth_card(
         barcode_value
@@ -608,7 +635,9 @@ def authenticate_card(
 
 def register_card(
     barcode_value: str,
-    card_name: str | None = None
+    card_name: str | None = None,
+    username: str | None = None,
+    real_name: str | None = None
 ):
     """
     カードを登録する。
@@ -631,9 +660,13 @@ def register_card(
             INSERT INTO auth_cards (
                 barcode_hash,
                 card_name,
+                username,
+                real_name,
                 enabled
             )
             VALUES (
+                %s,
+                %s,
                 %s,
                 %s,
                 1
@@ -642,6 +675,8 @@ def register_card(
             (
                 barcode_hash,
                 card_name,
+                username,
+                real_name,
             )
         )
 
@@ -833,23 +868,18 @@ initialize_auth_card_system()
 
 def BarcodeAuthGuard():
     """
-    認証カードシステムが有効な場合、起動時に認証カードの入力を要求する。
+    起動時の認証カード判定を行う。
+    戻り値は常に (success, card) の2要素タプル。
     """
+    if not is_auth_card_system_enabled():
+        return True, None
 
-    # 認証カード機能が有効な場合のみ実行
-    if is_auth_card_system_enabled():
+    barcode = input(
+        "認証カードを読み取ってください >> "
+    ).strip()
 
-        barcode = input(
-            "認証カードを読み取ってください >> "
-        ).strip()
+    return authenticate_card(barcode)
 
-        success, card = authenticate_card(
-            barcode
-        )
-
-        return success,card
-    else:
-        return None
 
 def get_user_login_info(card_id: int):
     """
@@ -920,6 +950,58 @@ def get_user_login_info(card_id: int):
         cursor.close()
         conn.close()
         
+
+def build_main_user(card=None):
+    """Velwether_Core.main(user) 用のユーザー辞書へ正規化する。"""
+    if card is None:
+        return {
+            "card_id": None,
+            "real_name": "ユーザー",
+            "last_login": "不明",
+        }
+
+    card_id = card.get("id")
+    if card_id is None:
+        raise ValueError("認証カード情報に id がありません。")
+
+    login_info = get_user_login_info(int(card_id))
+    if login_info is None:
+        raise RuntimeError("認証済みカードのユーザー情報を取得できませんでした。")
+
+    real_name = (
+        login_info.get("real_name")
+        or login_info.get("username")
+        or card.get("real_name")
+        or card.get("username")
+        or card.get("card_name")
+        or "ユーザー"
+    )
+    previous_login = login_info.get("last_login_at")
+
+    return {
+        "card_id": int(card_id),
+        "real_name": str(real_name),
+        "last_login": previous_login if previous_login is not None else "不明",
+    }
+
+
+def authenticate_startup_user():
+    """起動時認証を行い、Core.main(user) に渡せる結果を返す。"""
+    auth_required = is_auth_card_system_enabled()
+    success, card = BarcodeAuthGuard()
+    if not success:
+        return {
+            "ok": False,
+            "auth_required": auth_required,
+            "user": None,
+        }
+    return {
+        "ok": True,
+        "auth_required": auth_required,
+        "user": build_main_user(card),
+    }
+
+
 def get_real_name(card_id: int):
     conn = connect_database()
     cursor = conn.cursor()

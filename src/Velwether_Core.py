@@ -2074,6 +2074,7 @@ def load_system_prompt():
         f"最終ログイン日時は{last_login}です。"
         f"学習機能は{('有効' if learning_enabled_keyword else '無効')} です。"
         f"現在時刻は{current_date}です。"
+        f"なお、コマンド類の成功可否の記憶機能はないが、直近のあなた自身の記憶データの返答を会話上の前提にしてください。"
         f"{session_msg}"
     )
 

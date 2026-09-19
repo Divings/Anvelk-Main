@@ -1,0 +1,9 @@
+Additional permission under GNU GPL version 3 section 7
+
+The copyright holders of Anvelk Mainframe grant an additional permission under
+section 7 of GPL version 3: Anvelk Mainframe may be linked or combined with
+libanv_core.so covered by the Anvelk Proprietary License Agreement (APL) v1.0,
+and the resulting combination may be conveyed. GPL version 3 continues to
+apply to Anvelk Mainframe; libanv_core.so remains subject to its own license.
+This permission does not grant rights to third-party code beyond those granted
+by its copyright holders.
