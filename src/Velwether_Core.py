@@ -2074,7 +2074,7 @@ def load_system_prompt():
         f"最終ログイン日時は{last_login}です。"
         f"学習機能は{('有効' if learning_enabled_keyword else '無効')} です。"
         f"現在時刻は{current_date}です。"
-        f"なお、コマンド類の成功可否の記憶機能はないが、直近のあなた自身の記憶データの返答を会話上の前提にしてください。"
+        f"なお、コマンド類の成功可否の記憶機能はないが、直近のあなた自身の記憶データの返答を会話上の前提にしてください。(記憶データ上でエラーになっていて最終的に成功した場合はだいたい成功しています)"
         f"{session_msg}"
     )
 
@@ -4950,7 +4950,7 @@ def main(user):
                 elif role == "assistant":
                     print("")
                     console.print(f" {BOT_NAME}:")
-                    console.print(Markdown(display_response))
+                    console.print(Markdown(str(content)))
 
             print("")
             print(" ====================")
