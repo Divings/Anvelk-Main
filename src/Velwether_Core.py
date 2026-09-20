@@ -1852,6 +1852,135 @@ if not os.path.isfile(DATA_DIR / "Sys_Prompt.txt"):
 else:
     SYSTEM_PROMPT_FILE = DATA_DIR / "Sys_Prompt.txt"
 
+
+
+# =========================================================
+# Tool実行履歴
+# =========================================================
+
+EXEC_HISTORY_FILE = DATA_DIR / "execution_history.jsonl"
+
+
+def save_execution_history(tool_name, arguments, result):
+    """
+    Toolの実行結果をユーザー個別領域へ保存する。
+
+    保存先:
+    ~/.local/share/Avelia/execution_history.jsonl
+    """
+    import json
+    from datetime import datetime
+
+    try:
+        DATA_DIR.mkdir(
+            parents=True,
+            exist_ok=True
+        )
+
+        record = {
+            "executed_at": datetime.now().isoformat(
+                timespec="seconds"
+            ),
+            "tool": str(tool_name),
+            "arguments": arguments,
+            "result": result
+        }
+
+        with open(
+            EXEC_HISTORY_FILE,
+            "a",
+            encoding="utf-8"
+        ) as f:
+            f.write(
+                json.dumps(
+                    record,
+                    ensure_ascii=False,
+                    default=str
+                )
+                + "\n"
+            )
+
+        return True
+
+    except Exception as e:
+        # 履歴保存失敗だけでTool本体を失敗扱いにしない
+        print("")
+        print(" Tool実行履歴を保存できませんでした。")
+        print(f" {type(e).__name__}: {e}")
+        return False
+
+
+def load_execution_history(limit=20):
+    """
+    最近のTool実行履歴を取得する。
+    """
+    import json
+
+    if not EXEC_HISTORY_FILE.is_file():
+        return []
+
+    records = []
+
+    try:
+        with open(
+            EXEC_HISTORY_FILE,
+            "r",
+            encoding="utf-8"
+        ) as f:
+
+            for line in f:
+                line = line.strip()
+
+                if not line:
+                    continue
+
+                try:
+                    record = json.loads(line)
+
+                    if isinstance(record, dict):
+                        records.append(record)
+
+                except json.JSONDecodeError:
+                    continue
+
+    except Exception:
+        return []
+
+    if limit <= 0:
+        return []
+
+    return records[-limit:]
+
+
+def get_execution_history_context(limit=20):
+    """
+    System Promptへ渡すための実行履歴文字列を作成する。
+    """
+    import json
+
+    records = load_execution_history(limit)
+
+    if not records:
+        return (
+            "Tool実行履歴はありません。"
+            "履歴がないことだけを理由に、"
+            "過去の会話内容が誤りだったと断定しないでください。"
+        )
+
+    return (
+        "以下は実際に記録されたTool実行履歴です。\n"
+        "過去のコマンド・Tool実行について判断する場合は、"
+        "会話上の推測よりこの記録を優先してください。\n"
+        "履歴に存在しない場合は「実行記録からは確認できません」"
+        "と表現してください。\n\n"
+        + json.dumps(
+            records,
+            ensure_ascii=False,
+            indent=2,
+            default=str
+        )
+    )
+
 # パーミッションエラーの防止
 if os.path.isfile("/opt/Anvelk-Mainframe/data/memory.vlm"):
     for file in os.listdir("/opt/Anvelk-Mainframe/data/"):
@@ -2054,6 +2183,7 @@ def load_system_prompt():
     except FileNotFoundError:
         base_prompt = "あなたは自然な日本語を話すAIアシスタントです。"
     current_date=datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    execution_context = get_execution_history_context(limit=5)
     if sys_msg!="":
         session_msg=sys_msg
         sys_msg=""
@@ -2073,8 +2203,8 @@ def load_system_prompt():
         f"ユーザーの名前を呼ぶときは、必ず「{real_name}さん」と呼んでください。"
         f"最終ログイン日時は{last_login}です。"
         f"学習機能は{('有効' if learning_enabled_keyword else '無効')} です。"
+        f"{execution_context}"
         f"現在時刻は{current_date}です。"
-        f"なお、コマンド類の成功可否の記憶機能はないが、直近のあなた自身の記憶データの返答を会話上の前提にしてください。(記憶データ上でエラーになっていて最終的に成功した場合はだいたい成功しています)"
         f"{session_msg}"
     )
 
@@ -4688,6 +4818,11 @@ def chat_with_openai_responses(messages):
                         arguments
                     )
 
+                    save_execution_history(
+                        tool_name,
+                        arguments,
+                        tool_result
+                    )
                 except Exception as e:
                     tool_result = {
                         "success": False,
