@@ -1,0 +1,20 @@
+[Unit]
+Description=Avelia AI Daemon
+After=network-online.target mysql.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=mainframe
+WorkingDirectory=/opt/Anvelk-Mainframe
+ExecStart=/usr/bin/python3 /opt/Anvelk-Mainframe/Avelia.py
+Restart=on-failure
+RestartSec=5
+KillSignal=SIGTERM
+TimeoutStopSec=20
+Environment=PYTHONUNBUFFERED=1
+Environment=AVELIA_DAEMON_HOST=127.0.0.1
+Environment=AVELIA_DAEMON_PORT=47500
+
+[Install]
+WantedBy=multi-user.target
