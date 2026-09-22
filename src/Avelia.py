@@ -32,148 +32,9 @@ import socket
 import sys
 import time
 import traceback
-from pathlib import Path
 
 DEFAULT_HOST = os.getenv("AVELIA_DAEMON_HOST", "127.0.0.1")
 DEFAULT_PORT = int(os.getenv("AVELIA_DAEMON_PORT", "47500"))
-
-
-GOOGLE_CALENDAR_SCOPES = ["https://www.googleapis.com/auth/calendar"]
-GOOGLE_CALENDAR_TIMEZONE = "Asia/Tokyo"
-GOOGLE_CALENDAR_AUTH_PORT = 8765
-
-
-def _google_calendar_data_dir():
-    data_dir = Path.home() / ".local" / "share" / "Avelia"
-    data_dir.mkdir(parents=True, exist_ok=True)
-    return data_dir
-
-
-def _ensure_google_calendar_credentials_file(credentials_file: Path):
-    """OAuthクライアントJSONが無ければAvelia自身が対話作成する。"""
-    if credentials_file.is_file():
-        return credentials_file
-
-    import json
-
-    print("")
-    print(" Google Calendar OAuth設定ファイルがありません。")
-    print(" 初回設定を開始します。")
-    print("")
-    print(" Google Cloud Consoleで作成した『デスクトップ アプリ』の")
-    print(" OAuth Client ID / Client Secret を入力してください。")
-    print("")
-
-    client_id = input(" Google OAuth Client ID >> ").strip()
-    if not client_id:
-        raise RuntimeError("Google OAuth Client ID が入力されていません。")
-
-    client_secret = input(" Google OAuth Client Secret >> ").strip()
-    if not client_secret:
-        raise RuntimeError("Google OAuth Client Secret が入力されていません。")
-
-    data = {
-        "installed": {
-            "client_id": client_id,
-            "project_id": "avelia-google-calendar",
-            "auth_uri": "https://accounts.google.com/o/oauth2/auth",
-            "token_uri": "https://oauth2.googleapis.com/token",
-            "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
-            "client_secret": client_secret,
-            "redirect_uris": ["http://localhost"],
-        }
-    }
-
-    credentials_file.parent.mkdir(parents=True, exist_ok=True)
-    temp_file = credentials_file.with_suffix(".json.tmp")
-    with temp_file.open("w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
-        f.flush()
-        os.fsync(f.fileno())
-    os.replace(temp_file, credentials_file)
-    try:
-        credentials_file.chmod(0o600)
-    except OSError:
-        pass
-
-    print("")
-    print(" Google Calendar OAuth設定ファイルを作成しました。")
-    print(f" {credentials_file}")
-    print("")
-    return credentials_file
-
-
-def _run_google_calendar_auth():
-    """
-    Avelia本体内部でGoogle Calendar OAuth認証を完結させる。
-
-    認証用の外部Pythonスクリプトは不要。
-    GUIがある場合はブラウザを開き、GUIがない場合は認証URLを
-    現在のAveliaセッションへ表示する。
-    """
-    try:
-        from google_auth_oauthlib.flow import InstalledAppFlow
-    except ImportError as e:
-        raise RuntimeError(
-            "Google Calendar依存ライブラリがありません。 "
-            "python3 -m pip install google-api-python-client "
-            "google-auth-httplib2 google-auth-oauthlib"
-        ) from e
-
-    data_dir = _google_calendar_data_dir()
-    credentials_file = data_dir / "google_calendar_credentials.json"
-    token_file = data_dir / "google_calendar_token.json"
-
-    _ensure_google_calendar_credentials_file(credentials_file)
-
-    flow = InstalledAppFlow.from_client_secrets_file(
-        str(credentials_file),
-        GOOGLE_CALENDAR_SCOPES,
-    )
-
-    # DISPLAYなどの環境変数には依存しない。
-    # Avelia自身は常駐サーバーとして動くため、自動ブラウザ起動は行わず、
-    # 認証URLを必ず現在のセッションへ表示する。
-    print("")
-    print(" Google Calendar OAuth認証を開始します。")
-    print(
-        " Aveliaサーバーが別PCの場合は、必要に応じて次のSSHポートフォワードを使用してください。"
-    )
-    print(
-        f" ssh -L {GOOGLE_CALENDAR_AUTH_PORT}:127.0.0.1:{GOOGLE_CALENDAR_AUTH_PORT} <server>"
-    )
-    print("")
-
-    creds = flow.run_local_server(
-        host="127.0.0.1",
-        port=GOOGLE_CALENDAR_AUTH_PORT,
-        open_browser=False,
-        authorization_prompt_message=(
-            " 次のURLをブラウザで開いてGoogle認証してください:\n{url}\n"
-        ),
-        success_message=(
-            "AveliaのGoogle Calendar認証が完了しました。"
-            "このタブは閉じて構いません。"
-        ),
-    )
-
-    token_file.write_text(
-        creds.to_json(),
-        encoding="utf-8",
-    )
-    try:
-        token_file.chmod(0o600)
-    except OSError:
-        pass
-
-    print("")
-    print(" Google Calendar認証が完了しました。")
-
-    return {
-        "success": True,
-        "authenticated": True,
-        "token_file": str(token_file),
-    }
 
 
 def _configure_stdio():
@@ -672,7 +533,6 @@ def _build_parser():
     parser = argparse.ArgumentParser(description="Avelia systemd runtime")
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--connect", action="store_true", help="常駐AveliaへTCP接続")
-    mode.add_argument("--google-calendar-auth", action="store_true", help="Google Calendarの初回OAuth認証")
     parser.add_argument("--host", default=DEFAULT_HOST)
     parser.add_argument("--port", type=int, default=DEFAULT_PORT)
     return parser
@@ -682,15 +542,13 @@ _ARGS = _build_parser().parse_args()
 
 if _ARGS.connect:
     _AVELIA_MODE = "connect"
-elif _ARGS.google_calendar_auth:
-    _AVELIA_MODE = "google_calendar_auth"
 else:
     # systemd Type=simple 前提: 引数なし = 常駐サーバー。
     _AVELIA_MODE = "daemon"
 
 # クライアント側ではCoreを読み込まない。daemon側では一度だけ初期化し、
 # 接続ごとに同一プロセス内でTCP stdioセッションを開始する。
-if _AVELIA_MODE == "daemon":
+if _AVELIA_MODE != "connect":
 
     # Copyright (c) 2026 Anvelk Innovations
     # Licensed under the GPL v3.0 License.
@@ -873,332 +731,788 @@ if _AVELIA_MODE == "daemon":
     last_login = ""
 
     # =========================================================
-    # 予定管理互換レイヤー（Google Calendar）
+    # スケジュール管理
     # =========================================================
-    # 予定本体はGoogle Calendarを正本とする。
-    # MySQLはsettings等のAvelia設定用途のみで、予定データには使用しない。
+
+    def init_schedule_table():
+        """schedulesテーブルが存在しない場合は作成する。"""
+        conn = get_db_connection()
+        cursor = conn.cursor()
+
+        try:
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS schedules (
+                    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+                    title VARCHAR(255) NOT NULL,
+                    message TEXT NOT NULL,
+                    scheduled_at DATETIME NOT NULL,
+                    message_use TINYINT(1) NOT NULL DEFAULT 0,
+                    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (id),
+                    INDEX idx_schedule_due (message_use, scheduled_at)
+                ) ENGINE=InnoDB
+                  DEFAULT CHARSET=utf8mb4
+                  COLLATE=utf8mb4_unicode_ci
+                """
+            )
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            cursor.close()
+            conn.close()
+
 
     def _normalize_schedule_datetime(scheduled_at):
+        """スケジュール日時をdatetimeへ正規化する。"""
         from datetime import datetime
-        from zoneinfo import ZoneInfo
+
         if isinstance(scheduled_at, datetime):
-            dt = scheduled_at
-        elif isinstance(scheduled_at, str):
-            text = scheduled_at.strip()
-            dt = None
-            for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M"):
-                try:
-                    dt = datetime.strptime(text, fmt)
-                    break
-                except ValueError:
-                    pass
-            if dt is None:
-                try:
-                    dt = datetime.fromisoformat(text.replace(" ", "T", 1))
-                except ValueError as e:
-                    raise ValueError("日時形式が不正です。YYYY-MM-DD HH:MM またはISO 8601形式を使用してください。") from e
-        else:
+            return scheduled_at
+
+        if not isinstance(scheduled_at, str):
             raise ValueError("scheduled_at は日時文字列で指定してください。")
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=ZoneInfo(GOOGLE_CALENDAR_TIMEZONE))
-        return dt
 
-    def _normalize_calendar_date(value):
-        from datetime import date, datetime
-        if isinstance(value, datetime):
-            return value.date()
-        if isinstance(value, date):
-            return value
-        try:
-            return datetime.strptime(str(value).strip(), "%Y-%m-%d").date()
-        except ValueError as e:
-            raise ValueError("日付はYYYY-MM-DD形式で指定してください。") from e
-
-    def _normalize_calendar_time(value):
-        from datetime import datetime, time as dt_time
-        if value is None or value == "":
-            return None
-        if isinstance(value, dt_time):
-            return value
-        text = str(value).strip()
-        if not text:
-            return None
-        for fmt in ("%H:%M:%S", "%H:%M"):
+        for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M"):
             try:
-                return datetime.strptime(text, fmt).time()
+                return datetime.strptime(scheduled_at.strip(), fmt)
             except ValueError:
                 pass
-        raise ValueError("時刻はHH:MMまたはHH:MM:SS形式で指定してください。")
 
-    def _validate_calendar_title(title):
-        title = str(title).strip()
-        if not title:
-            raise ValueError("予定タイトルが空です。")
-        return title
+        raise ValueError(
+            "日時形式が不正です。YYYY-MM-DD HH:MM または "
+            "YYYY-MM-DD HH:MM:SS を使用してください。"
+        )
 
-    def _validate_calendar_time_range(start_time, end_time):
-        start_time = _normalize_calendar_time(start_time)
-        end_time = _normalize_calendar_time(end_time)
-        if start_time is not None and end_time is not None and end_time <= start_time:
-            raise ValueError("end_timeはstart_timeより後にしてください。")
-        return start_time, end_time
 
     def add_schedule(title, message, scheduled_at):
-        """旧Tool互換。通知予定をGoogle Calendarイベントとして登録する。"""
-        dt = _normalize_schedule_datetime(scheduled_at)
-        event = google_calendar_create_event(
-            title=_validate_calendar_title(title),
-            start=dt.isoformat(),
-            duration_minutes=30,
-            description=str(message).strip(),
-            calendar_id="primary",
-        )
-        return event["id"]
+        """新しい通知予定を登録し、登録IDを返す。"""
+        title = str(title).strip()
+        message = str(message).strip()
+        scheduled_at = _normalize_schedule_datetime(scheduled_at)
+
+        if not title:
+            raise ValueError("スケジュールタイトルが空です。")
+        if not message:
+            raise ValueError("通知メッセージが空です。")
+
+        conn = get_db_connection()
+        cursor = conn.cursor()
+
+        try:
+            cursor.execute(
+                """
+                INSERT INTO schedules
+                    (title, message, scheduled_at, message_use)
+                VALUES
+                    (%s, %s, %s, 0)
+                """,
+                (title, message, scheduled_at),
+            )
+            schedule_id = cursor.lastrowid
+            conn.commit()
+            return schedule_id
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            cursor.close()
+            conn.close()
+
 
     def get_schedules(include_used=False):
-        """
-        旧Tool互換。
+        """予定一覧を取得する。include_used=Falseなら未通知のみ。"""
+        conn = get_db_connection()
+        cursor = conn.cursor(dictionary=True)
 
-        Google Calendarから今後1年の予定を取得する。
-        include_used は旧Tool互換名として残し、
-        TrueならAvelia完了済み予定も含める。
-        Falseなら未完了予定だけを返す。
-
-        通知済み状態そのものはworkerの
-        google_calendar_notify_state.jsonが管理するため、
-        旧message_use列は互換用の値として返す。
-        """
-        events = google_calendar_get_upcoming(
-            days=365,
-            calendar_id="primary",
-            max_results=10000,
-            include_completed=bool(
-                include_used
-            ),
-        )
-
-        rows = []
-
-        for event in events:
-            completed = bool(
-                event.get(
-                    "completed",
-                    False,
+        try:
+            if include_used:
+                cursor.execute(
+                    """
+                    SELECT id, title, message, scheduled_at,
+                           message_use, created_at
+                    FROM schedules
+                    ORDER BY scheduled_at ASC, id ASC
+                    """
                 )
-            )
-
-            rows.append(
-                {
-                    "id":
-                        event["id"],
-
-                    "title":
-                        event["title"],
-
-                    "message":
-                        event.get(
-                            "description",
-                            "",
-                        ),
-
-                    "scheduled_at":
-                        event.get(
-                            "start",
-                            "",
-                        ),
-
-                    # 旧レスポンス互換。
-                    # Google Calendar移行後は
-                    # 「完了済み」を1として返す。
-                    "message_use":
-                        1
-                        if completed
-                        else 0,
-
-                    "created_at":
-                        None,
-
-                    "calendar_id":
-                        event.get(
-                            "calendar_id",
-                            "primary",
-                        ),
-
-                    "all_day":
-                        event.get(
-                            "all_day",
-                            False,
-                        ),
-
-                    "recurring_event_id":
-                        event.get(
-                            "recurring_event_id",
-                            "",
-                        ),
-
-                    "completed":
-                        completed,
-
-                    "html_link":
-                        event.get(
-                            "html_link",
-                            "",
-                        ),
-                }
-            )
-
-        return rows
+            else:
+                cursor.execute(
+                    """
+                    SELECT id, title, message, scheduled_at,
+                           message_use, created_at
+                    FROM schedules
+                    WHERE message_use = 0
+                    ORDER BY scheduled_at ASC, id ASC
+                    """
+                )
+            return cursor.fetchall()
+        finally:
+            cursor.close()
+            conn.close()
 
 
     def delete_schedule(schedule_id):
-        return bool(
-            google_calendar_delete_event(
-                str(schedule_id),
-                calendar_id="primary",
-            ).get("success")
-        )
+        """IDを指定して予定を削除する。存在した場合True。"""
+        conn = get_db_connection()
+        cursor = conn.cursor()
 
+        try:
+            cursor.execute(
+                "DELETE FROM schedules WHERE id = %s",
+                (int(schedule_id),),
+            )
+            deleted = cursor.rowcount > 0
+            conn.commit()
+            return deleted
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            cursor.close()
+            conn.close()
     def delete_calendar_once(schedule_id):
-        # 単発予定はそのイベント自身を削除する。
-        return delete_schedule(
-            schedule_id
-        )
+        """単発予定を削除する。"""
 
-    def _google_calendar_resolve_series_id(
-        event_id,
-        calendar_id="primary",
-    ):
-        """instance IDならrecurringEventIdを返し、master IDならそのまま返す。"""
-        event_id = str(
-            event_id
-        ).strip()
+        conn = get_db_connection()
+        cursor = conn.cursor()
 
-        if not event_id:
-            raise ValueError(
-                "event_idが空です。"
+        try:
+            cursor.execute(
+                """
+                DELETE FROM calendar_once
+                WHERE id = %s
+                """,
+                (
+                    int(schedule_id),
+                )
             )
 
-        service = (
-            _get_google_calendar_service()
-        )
-
-        event = (
-            service.events()
-            .get(
-                calendarId=calendar_id,
-                eventId=event_id,
+            deleted = (
+                cursor.rowcount > 0
             )
-            .execute()
-        )
 
-        return (
-            event.get(
-                "recurringEventId"
-            )
-            or event_id
-        )
+            conn.commit()
+
+            return deleted
+
+        except Exception:
+            conn.rollback()
+            raise
+
+        finally:
+            cursor.close()
+            conn.close()
+
 
     def delete_calendar_weekly(schedule_id):
-        # 旧DB版はweekly本体を削除していたため、
-        # expanded instance IDが渡されてもseries masterを削除する。
-        master_id = (
-            _google_calendar_resolve_series_id(
-                schedule_id,
-                calendar_id="primary",
+        """
+        曜日条件付き予定を削除する。
+
+        calendar_weekly_days と
+        calendar_weekly_status は
+        FOREIGN KEY ON DELETE CASCADE により
+        自動削除される。
+        """
+
+        conn = get_db_connection()
+        cursor = conn.cursor()
+
+        try:
+            cursor.execute(
+                """
+                DELETE FROM calendar_weekly
+                WHERE id = %s
+                """,
+                (
+                    int(schedule_id),
+                )
+            )
+
+            deleted = (
+                cursor.rowcount > 0
+            )
+
+            conn.commit()
+
+            return deleted
+
+        except Exception:
+            conn.rollback()
+            raise
+
+        finally:
+            cursor.close()
+            conn.close()
+
+
+
+    try:
+        init_schedule_table()
+    except Exception as e:
+        print("")
+        print(" Schedule Databaseを初期化できませんでした。")
+        print(f" {e}")
+
+    # =========================================================
+    # 通常予定管理
+    # =========================================================
+
+    def init_calendar_tables():
+        """
+        通知なしの通常予定を管理するテーブルを作成する。
+
+        calendar_once
+            単発予定
+
+        calendar_weekly
+            曜日条件付き予定本体
+
+        calendar_weekly_days
+            定期予定の曜日
+
+        calendar_weekly_status
+            定期予定の日ごとの完了状態
+        """
+
+        sql_list = [
+            """
+            CREATE TABLE IF NOT EXISTS calendar_once (
+                id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+
+                title VARCHAR(255) NOT NULL,
+                description TEXT NULL,
+
+                scheduled_date DATE NOT NULL,
+
+                start_time TIME NULL,
+                end_time TIME NULL,
+
+                completed TINYINT(1) NOT NULL DEFAULT 0,
+                completed_at DATETIME NULL,
+
+                source VARCHAR(32) NOT NULL DEFAULT 'manual',
+
+                created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+                updated_at DATETIME NOT NULL
+                    DEFAULT CURRENT_TIMESTAMP
+                    ON UPDATE CURRENT_TIMESTAMP,
+
+                PRIMARY KEY (id),
+
+                INDEX idx_calendar_once_date (
+                    scheduled_date,
+                    completed
+                )
+
+            ) ENGINE=InnoDB
+              DEFAULT CHARSET=utf8mb4
+              COLLATE=utf8mb4_unicode_ci
+            """,
+
+            """
+            CREATE TABLE IF NOT EXISTS calendar_weekly (
+                id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+
+                title VARCHAR(255) NOT NULL,
+                description TEXT NULL,
+
+                start_time TIME NULL,
+                end_time TIME NULL,
+
+                enabled TINYINT(1) NOT NULL DEFAULT 1,
+
+                source VARCHAR(32) NOT NULL DEFAULT 'manual',
+
+                created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+                updated_at DATETIME NOT NULL
+                    DEFAULT CURRENT_TIMESTAMP
+                    ON UPDATE CURRENT_TIMESTAMP,
+
+                PRIMARY KEY (id)
+
+            ) ENGINE=InnoDB
+              DEFAULT CHARSET=utf8mb4
+              COLLATE=utf8mb4_unicode_ci
+            """,
+
+            """
+            CREATE TABLE IF NOT EXISTS calendar_weekly_days (
+                id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+
+                schedule_id BIGINT UNSIGNED NOT NULL,
+
+                weekday TINYINT UNSIGNED NOT NULL,
+
+                PRIMARY KEY (id),
+
+                UNIQUE KEY uq_calendar_weekly_day (
+                    schedule_id,
+                    weekday
+                ),
+
+                INDEX idx_calendar_weekday (
+                    weekday
+                ),
+
+                CONSTRAINT fk_calendar_weekly_days
+                    FOREIGN KEY (schedule_id)
+                    REFERENCES calendar_weekly(id)
+                    ON DELETE CASCADE
+
+            ) ENGINE=InnoDB
+              DEFAULT CHARSET=utf8mb4
+              COLLATE=utf8mb4_unicode_ci
+            """,
+
+            """
+            CREATE TABLE IF NOT EXISTS calendar_weekly_status (
+                id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+
+                schedule_id BIGINT UNSIGNED NOT NULL,
+
+                scheduled_date DATE NOT NULL,
+
+                completed TINYINT(1) NOT NULL DEFAULT 0,
+
+                completed_at DATETIME NULL,
+
+                PRIMARY KEY (id),
+
+                UNIQUE KEY uq_calendar_weekly_status (
+                    schedule_id,
+                    scheduled_date
+                ),
+
+                INDEX idx_calendar_weekly_status_date (
+                    scheduled_date,
+                    completed
+                ),
+
+                CONSTRAINT fk_calendar_weekly_status
+                    FOREIGN KEY (schedule_id)
+                    REFERENCES calendar_weekly(id)
+                    ON DELETE CASCADE
+
+            ) ENGINE=InnoDB
+              DEFAULT CHARSET=utf8mb4
+              COLLATE=utf8mb4_unicode_ci
+            """
+        ]
+
+        conn = get_db_connection()
+        cursor = conn.cursor()
+
+        try:
+
+            for sql in sql_list:
+                cursor.execute(sql)
+
+            conn.commit()
+
+        except Exception:
+
+            conn.rollback()
+            raise
+
+        finally:
+
+            cursor.close()
+            conn.close()
+
+
+    def _normalize_calendar_date(value):
+
+        from datetime import date, datetime
+
+        if isinstance(value, datetime):
+            return value.date()
+
+        if isinstance(value, date):
+            return value
+
+        if not isinstance(value, str):
+            raise ValueError(
+                "日付はYYYY-MM-DD形式で指定してください。"
+            )
+
+        try:
+
+            return datetime.strptime(
+                value.strip(),
+                "%Y-%m-%d"
+            ).date()
+
+        except ValueError as e:
+
+            raise ValueError(
+                "日付形式が不正です。YYYY-MM-DDを使用してください。"
+            ) from e
+
+
+    def _normalize_calendar_time(value):
+
+        from datetime import (
+            time as dt_time,
+            datetime
+        )
+
+        if value is None or value == "":
+            return None
+
+        if isinstance(value, dt_time):
+            return value
+
+        if not isinstance(value, str):
+
+            raise ValueError(
+                "時刻はHH:MMまたはHH:MM:SS形式で指定してください。"
+            )
+
+        value = value.strip()
+
+        if not value:
+            return None
+
+        for fmt in (
+            "%H:%M:%S",
+            "%H:%M"
+        ):
+
+            try:
+
+                return datetime.strptime(
+                    value,
+                    fmt
+                ).time()
+
+            except ValueError:
+                pass
+
+        raise ValueError(
+            "時刻形式が不正です。"
+            "HH:MMまたはHH:MM:SSを使用してください。"
+        )
+
+
+    def _validate_calendar_title(title):
+
+        title = str(title).strip()
+
+        if not title:
+            raise ValueError(
+                "予定タイトルが空です。"
+            )
+
+        return title
+
+
+    def _validate_calendar_time_range(
+        start_time,
+        end_time
+    ):
+
+        start_time = _normalize_calendar_time(
+            start_time
+        )
+
+        end_time = _normalize_calendar_time(
+            end_time
+        )
+
+        if (
+            start_time is not None
+            and end_time is not None
+            and end_time < start_time
+        ):
+
+            raise ValueError(
+                "end_timeはstart_time以降にしてください。"
+            )
+
+        return start_time, end_time
+
+
+    def add_calendar_once(
+        title,
+        scheduled_date,
+        start_time=None,
+        end_time=None,
+        description=None,
+        source="avelia"
+    ):
+
+        title = _validate_calendar_title(
+            title
+        )
+
+        scheduled_date = _normalize_calendar_date(
+            scheduled_date
+        )
+
+        start_time, end_time = (
+            _validate_calendar_time_range(
+                start_time,
+                end_time
             )
         )
 
-        return bool(
-            google_calendar_delete_event(
-                master_id,
-                calendar_id="primary",
-            ).get("success")
-        )
+        if description is not None:
 
-    def add_calendar_once(title, scheduled_date, start_time=None, end_time=None, description=None, source="avelia"):
-        title = _validate_calendar_title(title)
-        scheduled_date = _normalize_calendar_date(scheduled_date)
-        start_time, end_time = _validate_calendar_time_range(start_time, end_time)
-        if start_time is None:
-            event = google_calendar_create_all_day(
-                title=title, scheduled_date=scheduled_date.isoformat(),
-                description=description, calendar_id="primary"
+            description = (
+                str(description).strip()
+                or None
             )
-        else:
-            from datetime import datetime, timedelta
-            from zoneinfo import ZoneInfo
-            tz = ZoneInfo(GOOGLE_CALENDAR_TIMEZONE)
-            start_dt = datetime.combine(scheduled_date, start_time, tzinfo=tz)
-            end_dt = datetime.combine(scheduled_date, end_time, tzinfo=tz) if end_time else start_dt + timedelta(hours=1)
-            event = google_calendar_create_event(
-                title=title, start=start_dt.isoformat(), end=end_dt.isoformat(),
-                description=description, calendar_id="primary"
+
+        conn = get_db_connection()
+        cursor = conn.cursor()
+
+        try:
+
+            cursor.execute(
+                """
+                INSERT INTO calendar_once
+                (
+                    title,
+                    description,
+                    scheduled_date,
+                    start_time,
+                    end_time,
+                    source
+                )
+                VALUES
+                (
+                    %s,
+                    %s,
+                    %s,
+                    %s,
+                    %s,
+                    %s
+                )
+                """,
+                (
+                    title,
+                    description,
+                    scheduled_date,
+                    start_time,
+                    end_time,
+                    source
+                )
             )
-        return event["id"]
 
-    def add_calendar_weekly(title, weekdays, start_time=None, end_time=None, description=None, source="avelia"):
-        event = google_calendar_create_weekly(
-            title=title, weekdays=weekdays, start_time=start_time, end_time=end_time,
-            description=description, calendar_id="primary"
-        )
-        return event["id"]
+            schedule_id = (
+                cursor.lastrowid
+            )
 
-    def complete_calendar_once(schedule_id):
-        return bool(
-            google_calendar_mark_completed(
-                str(schedule_id),
-                calendar_id="primary",
-            ).get("success")
+            conn.commit()
+
+            return schedule_id
+
+        except Exception:
+
+            conn.rollback()
+            raise
+
+        finally:
+
+            cursor.close()
+            conn.close()
+
+
+    def add_calendar_weekly(
+        title,
+        weekdays,
+        start_time=None,
+        end_time=None,
+        description=None,
+        source="avelia"
+    ):
+
+        title = _validate_calendar_title(
+            title
         )
+
+        if not isinstance(
+            weekdays,
+            (list, tuple, set)
+        ):
+
+            raise ValueError(
+                "weekdaysは配列で指定してください。"
+            )
+
+        weekdays = sorted(
+            {
+                int(day)
+                for day in weekdays
+            }
+        )
+
+        if not weekdays:
+
+            raise ValueError(
+                "曜日が指定されていません。"
+            )
+
+        for day in weekdays:
+
+            if day < 0 or day > 6:
+
+                raise ValueError(
+                    "曜日番号は0〜6です。"
+                )
+
+        start_time, end_time = (
+            _validate_calendar_time_range(
+                start_time,
+                end_time
+            )
+        )
+
+        if description is not None:
+
+            description = (
+                str(description).strip()
+                or None
+            )
+
+        conn = get_db_connection()
+        cursor = conn.cursor()
+
+        try:
+
+            cursor.execute(
+                """
+                INSERT INTO calendar_weekly
+                (
+                    title,
+                    description,
+                    start_time,
+                    end_time,
+                    enabled,
+                    source
+                )
+                VALUES
+                (
+                    %s,
+                    %s,
+                    %s,
+                    %s,
+                    1,
+                    %s
+                )
+                """,
+                (
+                    title,
+                    description,
+                    start_time,
+                    end_time,
+                    source
+                )
+            )
+
+            schedule_id = (
+                cursor.lastrowid
+            )
+
+            cursor.executemany(
+                """
+                INSERT INTO calendar_weekly_days
+                (
+                    schedule_id,
+                    weekday
+                )
+                VALUES
+                (
+                    %s,
+                    %s
+                )
+                """,
+                [
+                    (
+                        schedule_id,
+                        day
+                    )
+                    for day
+                    in weekdays
+                ]
+            )
+
+            conn.commit()
+
+            return schedule_id
+
+        except Exception:
+
+            conn.rollback()
+            raise
+
+        finally:
+
+            cursor.close()
+            conn.close()
+
+
+    def complete_calendar_once(
+        schedule_id
+    ):
+
+        conn = get_db_connection()
+        cursor = conn.cursor()
+
+        try:
+
+            cursor.execute(
+                """
+                UPDATE calendar_once
+
+                SET
+                    completed = 1,
+                    completed_at = NOW()
+
+                WHERE
+                    id = %s
+                    AND completed = 0
+                """,
+                (
+                    int(schedule_id),
+                )
+            )
+
+            changed = (
+                cursor.rowcount > 0
+            )
+
+            conn.commit()
+
+            return changed
+
+        except Exception:
+
+            conn.rollback()
+            raise
+
+        finally:
+
+            cursor.close()
+            conn.close()
+
 
     def complete_calendar_weekly(
         schedule_id,
-        scheduled_date=None,
+        scheduled_date=None
     ):
-        """
-        定期予定のその1回だけを完了扱いにする。
 
-        get_calendar_date() が返すexpanded instance IDなら
-        そのinstanceだけをpatchする。
+        from datetime import date
 
-        series master IDが渡された場合はscheduled_dateから
-        対象instanceを探してpatchする。
-        """
-        event_id = str(
-            schedule_id
-        ).strip()
+        if scheduled_date is None:
 
-        if not event_id:
-            raise ValueError(
-                "schedule_idが空です。"
-            )
-
-        service = (
-            _get_google_calendar_service()
-        )
-
-        event = (
-            service.events()
-            .get(
-                calendarId="primary",
-                eventId=event_id,
-            )
-            .execute()
-        )
-
-        # recurringEventIdがあるなら既に個別instance。
-        if event.get(
-            "recurringEventId"
-        ):
-            target_event_id = event_id
+            target_date = date.today()
 
         else:
-            # master eventなら対象日を使ってinstanceを解決する。
-            if scheduled_date is None:
-                raise ValueError(
-                    "定期予定のmaster IDを完了する場合は"
-                    "scheduled_dateが必要です。"
-                )
 
             target_date = (
                 _normalize_calendar_date(
@@ -1206,92 +1520,599 @@ if _AVELIA_MODE == "daemon":
                 )
             )
 
-            events = google_calendar_get_date(
-                target_date.isoformat(),
-                calendar_id="primary",
+        schedule_id = int(
+            schedule_id
+        )
+
+        conn = get_db_connection()
+        cursor = conn.cursor()
+
+        try:
+
+            cursor.execute(
+                """
+                SELECT id
+
+                FROM calendar_weekly
+
+                WHERE
+                    id = %s
+                    AND enabled = 1
+                """,
+                (
+                    schedule_id,
+                )
             )
 
-            target_event_id = None
+            if cursor.fetchone() is None:
+                return False
 
-            for item in events:
-                if (
-                    item.get(
-                        "recurring_event_id"
-                    )
-                    == event_id
-                ):
-                    target_event_id = (
-                        item.get("id")
-                    )
-                    break
+            cursor.execute(
+                """
+                SELECT 1
 
-            if not target_event_id:
+                FROM calendar_weekly_days
+
+                WHERE
+                    schedule_id = %s
+                    AND weekday = %s
+                """,
+                (
+                    schedule_id,
+                    target_date.weekday()
+                )
+            )
+
+            if cursor.fetchone() is None:
+
                 raise ValueError(
-                    "指定日に該当する定期予定の"
-                    "発生回が見つかりません。"
+                    "指定日はこの定期予定の対象曜日ではありません。"
                 )
 
-        return bool(
-            google_calendar_mark_completed(
-                target_event_id,
-                calendar_id="primary",
-            ).get("success")
+            cursor.execute(
+                """
+                INSERT INTO calendar_weekly_status
+                (
+                    schedule_id,
+                    scheduled_date,
+                    completed,
+                    completed_at
+                )
+
+                VALUES
+                (
+                    %s,
+                    %s,
+                    1,
+                    NOW()
+                )
+
+                ON DUPLICATE KEY UPDATE
+
+                    completed = 1,
+                    completed_at = NOW()
+                """,
+                (
+                    schedule_id,
+                    target_date
+                )
+            )
+
+            conn.commit()
+
+            return True
+
+        except Exception:
+
+            conn.rollback()
+            raise
+
+        finally:
+
+            cursor.close()
+            conn.close()
+
+    def _calendar_time_to_string(
+        value
+    ):
+
+        if value is None:
+            return None
+
+        if hasattr(
+            value,
+            "total_seconds"
+        ):
+
+            seconds = int(
+                value.total_seconds()
+            )
+
+            hours = (
+                seconds // 3600
+            )
+
+            minutes = (
+                seconds % 3600
+            ) // 60
+
+            seconds = (
+                seconds % 60
+            )
+
+            return (
+                f"{hours:02d}:"
+                f"{minutes:02d}:"
+                f"{seconds:02d}"
+            )
+
+        if hasattr(
+            value,
+            "strftime"
+        ):
+
+            return value.strftime(
+                "%H:%M:%S"
+            )
+
+        return str(value)
+
+
+    def get_calendar_date(
+        target_date=None,
+        unfinished_only=True
+    ):
+
+        from datetime import date
+
+        if target_date is None:
+
+            target = date.today()
+
+        else:
+
+            target = (
+                _normalize_calendar_date(
+                    target_date
+                )
+            )
+
+        weekday = (
+            target.weekday()
         )
 
-    def get_calendar_date(target_date=None, unfinished_only=True):
-        from datetime import date
-        target = date.today() if target_date is None else _normalize_calendar_date(target_date)
-        events = google_calendar_get_date(
-            target.isoformat(),
-            calendar_id="primary",
-            include_completed=not bool(
-                unfinished_only
-            ),
+        conn = get_db_connection()
+
+        once_cursor = conn.cursor(
+            dictionary=True
         )
-        schedules = []
-        for e in events:
-            start = e.get("start", "")
-            end = e.get("end", "")
-            start_time = None if e.get("all_day") else (start[11:19] if len(start) >= 19 else start[11:])
-            end_time = None if e.get("all_day") else (end[11:19] if len(end) >= 19 else end[11:])
-            schedules.append({
-                "schedule_type": "weekly" if e.get("recurring_event_id") else "once",
-                "id": e["id"], "title": e["title"], "description": e.get("description", ""),
-                "date": target.isoformat(), "start_time": start_time, "end_time": end_time,
-                "completed": bool(e.get("completed", False)),
-            })
-        return {"date": target.isoformat(), "weekday": target.weekday(), "count": len(schedules), "schedules": schedules}
+
+        weekly_cursor = conn.cursor(
+            dictionary=True
+        )
+
+        try:
+
+            once_sql = """
+                SELECT
+                    id,
+                    title,
+                    description,
+                    scheduled_date,
+                    start_time,
+                    end_time,
+                    completed,
+                    completed_at,
+                    source
+
+                FROM calendar_once
+
+                WHERE scheduled_date = %s
+            """
+
+            if unfinished_only:
+
+                once_sql += """
+                    AND completed = 0
+                """
+
+            once_sql += """
+                ORDER BY
+                    start_time IS NULL,
+                    start_time,
+                    id
+            """
+
+            once_cursor.execute(
+                once_sql,
+                (
+                    target,
+                )
+            )
+
+            once_rows = (
+                once_cursor.fetchall()
+            )
+
+            weekly_sql = """
+                SELECT
+                    cw.id,
+                    cw.title,
+                    cw.description,
+                    cw.start_time,
+                    cw.end_time,
+                    cw.source,
+
+                    COALESCE(
+                        cws.completed,
+                        0
+                    ) AS completed,
+
+                    cws.completed_at
+
+                FROM calendar_weekly AS cw
+
+                INNER JOIN calendar_weekly_days AS cwd
+
+                    ON cw.id =
+                       cwd.schedule_id
+
+                LEFT JOIN calendar_weekly_status AS cws
+
+                    ON cw.id =
+                       cws.schedule_id
+
+                    AND cws.scheduled_date =
+                        %s
+
+                WHERE
+                    cw.enabled = 1
+
+                    AND cwd.weekday = %s
+            """
+
+            if unfinished_only:
+
+                weekly_sql += """
+                    AND COALESCE(
+                        cws.completed,
+                        0
+                    ) = 0
+                """
+
+            weekly_sql += """
+                ORDER BY
+                    cw.start_time IS NULL,
+                    cw.start_time,
+                    cw.id
+            """
+
+            weekly_cursor.execute(
+                weekly_sql,
+                (
+                    target,
+                    weekday
+                )
+            )
+
+            weekly_rows = (
+                weekly_cursor.fetchall()
+            )
+
+            schedules = []
+
+            for row in once_rows:
+
+                schedules.append(
+                    {
+                        "schedule_type":
+                            "once",
+
+                        "id":
+                            row["id"],
+
+                        "title":
+                            row["title"],
+
+                        "description":
+                            row["description"],
+
+                        "date":
+                            target.isoformat(),
+
+                        "start_time":
+                            _calendar_time_to_string(
+                                row["start_time"]
+                            ),
+
+                        "end_time":
+                            _calendar_time_to_string(
+                                row["end_time"]
+                            ),
+
+                        "completed":
+                            bool(
+                                row["completed"]
+                            )
+                    }
+                )
+
+            for row in weekly_rows:
+
+                schedules.append(
+                    {
+                        "schedule_type":
+                            "weekly",
+
+                        "id":
+                            row["id"],
+
+                        "title":
+                            row["title"],
+
+                        "description":
+                            row["description"],
+
+                        "date":
+                            target.isoformat(),
+
+                        "start_time":
+                            _calendar_time_to_string(
+                                row["start_time"]
+                            ),
+
+                        "end_time":
+                            _calendar_time_to_string(
+                                row["end_time"]
+                            ),
+
+                        "completed":
+                            bool(
+                                row["completed"]
+                            )
+                    }
+                )
+
+            schedules.sort(
+                key=lambda x: (
+                    x["start_time"]
+                    is None,
+
+                    x["start_time"]
+                    or "",
+
+                    x["id"]
+                )
+            )
+
+            return {
+                "date":
+                    target.isoformat(),
+
+                "weekday":
+                    weekday,
+
+                "count":
+                    len(schedules),
+
+                "schedules":
+                    schedules
+            }
+
+        finally:
+
+            once_cursor.close()
+            weekly_cursor.close()
+            conn.close()
+
 
     def get_calendar_today():
-        return get_calendar_date(target_date=None, unfinished_only=True)
 
-    def import_calendar_csv(csv_path):
-        """旧CSV形式をGoogle Calendarへ取り込む。"""
+        return get_calendar_date(
+            target_date=None,
+            unfinished_only=True
+        )
+
+    # =========================================================
+    # CSVインポート
+    # =========================================================
+    def import_calendar_csv(
+        csv_path
+    ):
+
         import csv
-        csv_path = os.path.abspath(os.path.expanduser(str(csv_path)))
-        if not os.path.isfile(csv_path):
-            raise FileNotFoundError(f"CSVファイルがありません: {csv_path}")
-        added, skipped, errors = 0, 0, []
-        with open(csv_path, "r", encoding="utf-8-sig", newline="") as f:
-            for row_number, row in enumerate(csv.DictReader(f), start=2):
+        import os
+
+        csv_path = os.path.abspath(
+            os.path.expanduser(
+                str(csv_path)
+            )
+        )
+
+        if not os.path.isfile(
+            csv_path
+        ):
+
+            raise FileNotFoundError(
+                f"CSVファイルがありません: {csv_path}"
+            )
+
+        added = 0
+        skipped = 0
+        errors = []
+
+        with open(
+            csv_path,
+            "r",
+            encoding="utf-8-sig",
+            newline=""
+        ) as f:
+
+            reader = csv.DictReader(
+                f
+            )
+
+            for row_number, row in enumerate(
+                reader,
+                start=2
+            ):
+
                 try:
-                    typ = str(row.get("type", "")).strip().lower()
-                    title = str(row.get("title", "")).strip()
-                    description = str(row.get("description") or "").strip() or None
-                    start_time = str(row.get("start_time") or "").strip() or None
-                    end_time = str(row.get("end_time") or "").strip() or None
-                    if typ == "once":
-                        add_calendar_once(title, str(row.get("date") or "").strip(), start_time, end_time, description, "csv")
-                    elif typ == "weekly":
-                        weekdays = [int(x) for x in str(row.get("weekdays") or "").split("|") if x.strip()]
-                        add_calendar_weekly(title, weekdays, start_time, end_time, description, "csv")
+
+                    schedule_type = str(
+                        row.get(
+                            "type",
+                            ""
+                        )
+                    ).strip().lower()
+
+                    title = str(
+                        row.get(
+                            "title",
+                            ""
+                        )
+                    ).strip()
+
+                    description = (
+                        str(
+                            row.get(
+                                "description"
+                            )
+                            or ""
+                        ).strip()
+                        or None
+                    )
+
+                    start_time = (
+                        str(
+                            row.get(
+                                "start_time"
+                            )
+                            or ""
+                        ).strip()
+                        or None
+                    )
+
+                    end_time = (
+                        str(
+                            row.get(
+                                "end_time"
+                            )
+                            or ""
+                        ).strip()
+                        or None
+                    )
+
+                    if (
+                        schedule_type
+                        == "once"
+                    ):
+
+                        scheduled_date = (
+                            str(
+                                row.get(
+                                    "date"
+                                )
+                                or ""
+                            ).strip()
+                        )
+
+                        add_calendar_once(
+                            title=title,
+                            scheduled_date=scheduled_date,
+                            start_time=start_time,
+                            end_time=end_time,
+                            description=description,
+                            source="csv"
+                        )
+
+                    elif (
+                        schedule_type
+                        == "weekly"
+                    ):
+
+                        weekday_text = str(
+                            row.get(
+                                "weekdays"
+                            )
+                            or ""
+                        ).strip()
+
+                        weekdays = [
+                            int(x)
+                            for x
+                            in weekday_text.split(
+                                "|"
+                            )
+                            if x.strip()
+                        ]
+
+                        add_calendar_weekly(
+                            title=title,
+                            weekdays=weekdays,
+                            start_time=start_time,
+                            end_time=end_time,
+                            description=description,
+                            source="csv"
+                        )
+
                     else:
-                        raise ValueError(f"未対応type: {typ}")
+
+                        raise ValueError(
+                            f"未対応type: "
+                            f"{schedule_type}"
+                        )
+
                     added += 1
+
                 except Exception as e:
+
                     skipped += 1
-                    errors.append({"row": row_number, "error": str(e)})
-        return {"success": True, "added": added, "skipped": skipped, "errors": errors}
+
+                    errors.append(
+                        {
+                            "row":
+                                row_number,
+
+                            "error":
+                                str(e)
+                        }
+                    )
+
+        return {
+            "success":
+                True,
+
+            "added":
+                added,
+
+            "skipped":
+                skipped,
+
+            "errors":
+                errors
+        }
+
+    # =========================================================
+    #カレンダーDB初期化
+    #========================================================
+
+    try:
+
+        init_calendar_tables()
+
+    except Exception as e:
+
+        print("")
+        print(
+            " Calendar Databaseを"
+            "初期化できませんでした。"
+        )
+
+        print(
+            f" {e}"
+        )
+
 
 
     def load_settings_from_db(section_name):
@@ -1480,1091 +2301,6 @@ if _AVELIA_MODE == "daemon":
     DATA_DIR = Path.home() / ".local" / "share" / "Avelia"
     LOG_DIR = DATA_DIR / "logs"
 
-
-    # =========================================================
-    # Google Calendar
-    # =========================================================
-
-    GOOGLE_CALENDAR_CREDENTIALS_FILE = DATA_DIR / "google_calendar_credentials.json"
-    GOOGLE_CALENDAR_TOKEN_FILE = DATA_DIR / "google_calendar_token.json"
-
-    _google_calendar_service_cache = None
-
-
-    def _get_google_calendar_service():
-        """保存済みOAuth tokenからGoogle Calendar API clientを返す。"""
-        global _google_calendar_service_cache
-
-        if _google_calendar_service_cache is not None:
-            return _google_calendar_service_cache
-
-        try:
-            from google.auth.transport.requests import Request as GoogleAuthRequest
-            from google.oauth2.credentials import Credentials as GoogleCredentials
-            from googleapiclient.discovery import build as google_build
-        except ImportError as e:
-            raise RuntimeError(
-                "Google Calendar依存ライブラリがありません。"
-                " python3 -m pip install google-api-python-client "
-                "google-auth-httplib2 google-auth-oauthlib"
-            ) from e
-
-        if not GOOGLE_CALENDAR_TOKEN_FILE.is_file():
-            raise RuntimeError(
-                "Google Calendarが未認証です。"
-                " Google Calendar認証を実行してください。"
-            )
-
-        try:
-            creds = GoogleCredentials.from_authorized_user_file(
-                str(GOOGLE_CALENDAR_TOKEN_FILE),
-                GOOGLE_CALENDAR_SCOPES,
-            )
-        except Exception as e:
-            raise RuntimeError(f"Google Calendar tokenを読み込めません: {e}") from e
-
-        if creds.expired and creds.refresh_token:
-            try:
-                creds.refresh(GoogleAuthRequest())
-                GOOGLE_CALENDAR_TOKEN_FILE.write_text(
-                    creds.to_json(),
-                    encoding="utf-8",
-                )
-                try:
-                    GOOGLE_CALENDAR_TOKEN_FILE.chmod(0o600)
-                except OSError:
-                    pass
-            except Exception as e:
-                raise RuntimeError(f"Google Calendar token更新に失敗しました: {e}") from e
-
-        if not creds.valid:
-            raise RuntimeError(
-                "Google Calendar認証情報が無効です。"
-                " Google Calendarを再認証してください。"
-            )
-
-        _google_calendar_service_cache = google_build(
-            "calendar",
-            "v3",
-            credentials=creds,
-            cache_discovery=False,
-        )
-        return _google_calendar_service_cache
-
-
-    def _google_calendar_datetime(value):
-        """ISO日時文字列をAsia/Tokyoのaware datetimeへ正規化する。"""
-        from datetime import datetime
-        from zoneinfo import ZoneInfo
-
-        if not isinstance(value, str) or not value.strip():
-            raise ValueError("日時文字列が空です。")
-
-        text = value.strip()
-        if " " in text and "T" not in text:
-            text = text.replace(" ", "T", 1)
-
-        try:
-            dt = datetime.fromisoformat(text)
-        except ValueError as e:
-            raise ValueError(
-                "日時は YYYY-MM-DD HH:MM またはISO 8601形式で指定してください。"
-            ) from e
-
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=ZoneInfo(GOOGLE_CALENDAR_TIMEZONE))
-        return dt
-
-
-    def _google_calendar_event_to_dict(event, calendar_id="primary"):
-        start_data = event.get("start", {})
-        end_data = event.get("end", {})
-        private_props = event.get("extendedProperties", {}).get("private", {})
-        return {
-            "id": event.get("id", ""),
-            "title": event.get("summary", "(タイトルなし)"),
-            "description": event.get("description", ""),
-            "location": event.get("location", ""),
-            "start": start_data.get("dateTime") or start_data.get("date") or "",
-            "end": end_data.get("dateTime") or end_data.get("date") or "",
-            "all_day": "date" in start_data and "dateTime" not in start_data,
-            "status": event.get("status", ""),
-            "html_link": event.get("htmlLink", ""),
-            "calendar_id": calendar_id,
-            "recurring_event_id": event.get("recurringEventId", ""),
-            "recurrence": event.get("recurrence", []),
-            "completed": private_props.get("avelia_completed") == "1",
-        }
-
-
-    def google_calendar_list_events(
-        start=None,
-        end=None,
-        query=None,
-        calendar_id="primary",
-        max_results=100,
-        include_completed=True,
-    ):
-        """
-        Google Calendarから期間内イベントを取得する。
-
-        - singleEvents=True で繰り返し予定を各発生回へ展開
-        - nextPageToken を最後まで処理
-        - max_results はAvelia側の総取得上限として扱う
-        - include_completed=False の場合、
-          extendedProperties.private.avelia_completed=1 を除外
-        """
-        from datetime import datetime, timedelta
-        from zoneinfo import ZoneInfo
-
-        service = _get_google_calendar_service()
-        tz = ZoneInfo(GOOGLE_CALENDAR_TIMEZONE)
-
-        start_dt = (
-            _google_calendar_datetime(start)
-            if start
-            else datetime.now(tz)
-        )
-
-        end_dt = (
-            _google_calendar_datetime(end)
-            if end
-            else start_dt + timedelta(days=30)
-        )
-
-        if end_dt <= start_dt:
-            raise ValueError(
-                "endはstartより後にしてください。"
-            )
-
-        limit = max(
-            1,
-            min(
-                int(max_results),
-                10000,
-            ),
-        )
-
-        events = []
-        page_token = None
-
-        while len(events) < limit:
-            per_page = min(
-                2500,
-                max(
-                    1,
-                    limit - len(events),
-                ),
-            )
-
-            params = {
-                "calendarId": calendar_id,
-                "timeMin": start_dt.isoformat(),
-                "timeMax": end_dt.isoformat(),
-                "singleEvents": True,
-                "orderBy": "startTime",
-                "showDeleted": False,
-                "maxResults": per_page,
-                "timeZone": GOOGLE_CALENDAR_TIMEZONE,
-            }
-
-            if query:
-                params["q"] = str(
-                    query
-                )
-
-            if page_token:
-                params["pageToken"] = (
-                    page_token
-                )
-
-            result = (
-                service.events()
-                .list(
-                    **params
-                )
-                .execute()
-            )
-
-            for item in result.get(
-                "items",
-                [],
-            ):
-                if (
-                    item.get("status")
-                    == "cancelled"
-                ):
-                    continue
-
-                converted = (
-                    _google_calendar_event_to_dict(
-                        item,
-                        calendar_id,
-                    )
-                )
-
-                if (
-                    not include_completed
-                    and converted.get(
-                        "completed",
-                        False,
-                    )
-                ):
-                    continue
-
-                events.append(
-                    converted
-                )
-
-                if len(events) >= limit:
-                    break
-
-            page_token = result.get(
-                "nextPageToken"
-            )
-
-            if not page_token:
-                break
-
-        return events
-
-
-    def google_calendar_get_event(
-        event_id,
-        calendar_id="primary",
-    ):
-        """
-        Google CalendarイベントをイベントIDで1件取得する。
-        """
-        event_id = str(
-            event_id
-        ).strip()
-
-        if not event_id:
-            raise ValueError(
-                "event_idが空です。"
-            )
-
-        event = (
-            _get_google_calendar_service()
-            .events()
-            .get(
-                calendarId=calendar_id,
-                eventId=event_id,
-            )
-            .execute()
-        )
-
-        return _google_calendar_event_to_dict(
-            event,
-            calendar_id,
-        )
-
-
-    def google_calendar_get_upcoming(
-        days=30,
-        calendar_id="primary",
-        max_results=100,
-        include_completed=False,
-    ):
-        """
-        現在時刻から指定日数先までの予定を取得する。
-        """
-        from datetime import datetime, timedelta
-        from zoneinfo import ZoneInfo
-
-        days = int(
-            days
-        )
-
-        if days < 1:
-            raise ValueError(
-                "daysは1以上にしてください。"
-            )
-
-        tz = ZoneInfo(
-            GOOGLE_CALENDAR_TIMEZONE
-        )
-
-        now = datetime.now(
-            tz
-        )
-
-        return google_calendar_list_events(
-            start=now.isoformat(),
-            end=(
-                now
-                + timedelta(days=days)
-            ).isoformat(),
-            calendar_id=calendar_id,
-            max_results=max_results,
-            include_completed=include_completed,
-        )
-
-
-    def google_calendar_get_date(
-        target_date,
-        calendar_id="primary",
-        include_completed=True,
-    ):
-        from datetime import datetime, timedelta
-        from zoneinfo import ZoneInfo
-
-        try:
-            d = datetime.strptime(
-                str(target_date).strip(),
-                "%Y-%m-%d",
-            ).date()
-
-        except ValueError as e:
-            raise ValueError(
-                "日付はYYYY-MM-DD形式で指定してください。"
-            ) from e
-
-        tz = ZoneInfo(
-            GOOGLE_CALENDAR_TIMEZONE
-        )
-
-        start = datetime(
-            d.year,
-            d.month,
-            d.day,
-            tzinfo=tz,
-        )
-
-        end = (
-            start
-            + timedelta(days=1)
-        )
-
-        return google_calendar_list_events(
-            start=start.isoformat(),
-            end=end.isoformat(),
-            calendar_id=calendar_id,
-            max_results=2500,
-            include_completed=include_completed,
-        )
-
-
-    def google_calendar_create_event(
-        title,
-        start,
-        end=None,
-        duration_minutes=60,
-        description=None,
-        location=None,
-        calendar_id="primary",
-    ):
-        from datetime import timedelta
-
-        title = str(title).strip()
-        if not title:
-            raise ValueError("予定タイトルが空です。")
-
-        start_dt = _google_calendar_datetime(start)
-        end_dt = (
-            _google_calendar_datetime(end)
-            if end
-            else start_dt + timedelta(minutes=int(duration_minutes))
-        )
-        if end_dt <= start_dt:
-            raise ValueError("終了時刻は開始時刻より後にしてください。")
-
-        body = {
-            "summary": title,
-            "start": {
-                "dateTime": start_dt.isoformat(),
-                "timeZone": GOOGLE_CALENDAR_TIMEZONE,
-            },
-            "end": {
-                "dateTime": end_dt.isoformat(),
-                "timeZone": GOOGLE_CALENDAR_TIMEZONE,
-            },
-        }
-        if description:
-            body["description"] = str(description)
-        if location:
-            body["location"] = str(location)
-
-        event = _get_google_calendar_service().events().insert(
-            calendarId=calendar_id,
-            body=body,
-        ).execute()
-        return _google_calendar_event_to_dict(event, calendar_id)
-
-
-    def google_calendar_create_all_day(
-        title,
-        scheduled_date,
-        end_date=None,
-        description=None,
-        location=None,
-        calendar_id="primary",
-    ):
-        from datetime import datetime, timedelta
-
-        title = str(title).strip()
-        if not title:
-            raise ValueError("予定タイトルが空です。")
-
-        try:
-            start_d = datetime.strptime(str(scheduled_date).strip(), "%Y-%m-%d").date()
-            end_d = (
-                datetime.strptime(str(end_date).strip(), "%Y-%m-%d").date()
-                if end_date
-                else start_d + timedelta(days=1)
-            )
-        except ValueError as e:
-            raise ValueError("日付はYYYY-MM-DD形式で指定してください。") from e
-
-        if end_d <= start_d:
-            raise ValueError("end_dateはscheduled_dateより後にしてください。")
-
-        body = {
-            "summary": title,
-            "start": {"date": start_d.isoformat()},
-            "end": {"date": end_d.isoformat()},
-        }
-        if description:
-            body["description"] = str(description)
-        if location:
-            body["location"] = str(location)
-
-        event = _get_google_calendar_service().events().insert(
-            calendarId=calendar_id,
-            body=body,
-        ).execute()
-        return _google_calendar_event_to_dict(event, calendar_id)
-
-
-    def google_calendar_create_weekly(
-        title, weekdays, start_time=None, end_time=None, description=None,
-        location=None, calendar_id="primary", start_date=None,
-    ):
-        """曜日指定の毎週繰り返し予定をGoogle Calendarへ作成する。"""
-        from datetime import date, datetime, timedelta
-        from zoneinfo import ZoneInfo
-
-        title = _validate_calendar_title(title)
-
-        weekdays = sorted({int(x) for x in weekdays})
-        if not weekdays or any(x < 0 or x > 6 for x in weekdays):
-            raise ValueError("weekdaysは0(月)〜6(日)を1つ以上指定してください。")
-
-        st, et = _validate_calendar_time_range(start_time, end_time)
-
-        base = (
-            _normalize_calendar_date(start_date)
-            if start_date
-            else date.today()
-        )
-
-        first_date = base + timedelta(
-            days=min(
-                (wd - base.weekday()) % 7
-                for wd in weekdays
-            )
-        )
-
-        codes = [
-            "MO", "TU", "WE", "TH",
-            "FR", "SA", "SU"
-        ]
-
-        recurrence = [
-            "RRULE:FREQ=WEEKLY;BYDAY="
-            + ",".join(
-                codes[x]
-                for x in weekdays
-            )
-        ]
-
-        # start_time=None は旧calendar_weeklyの仕様に合わせ、
-        # 終日の毎週予定としてGoogle Calendarへ登録する。
-        if st is None:
-            body = {
-                "summary": title,
-                "start": {
-                    "date": first_date.isoformat()
-                },
-                "end": {
-                    "date": (
-                        first_date
-                        + timedelta(days=1)
-                    ).isoformat()
-                },
-                "recurrence": recurrence,
-            }
-
-        else:
-            tz = ZoneInfo(
-                GOOGLE_CALENDAR_TIMEZONE
-            )
-
-            start_dt = datetime.combine(
-                first_date,
-                st,
-                tzinfo=tz,
-            )
-
-            end_dt = (
-                datetime.combine(
-                    first_date,
-                    et,
-                    tzinfo=tz,
-                )
-                if et
-                else start_dt
-                + timedelta(hours=1)
-            )
-
-            body = {
-                "summary": title,
-                "start": {
-                    "dateTime":
-                        start_dt.isoformat(),
-                    "timeZone":
-                        GOOGLE_CALENDAR_TIMEZONE,
-                },
-                "end": {
-                    "dateTime":
-                        end_dt.isoformat(),
-                    "timeZone":
-                        GOOGLE_CALENDAR_TIMEZONE,
-                },
-                "recurrence": recurrence,
-            }
-
-        if description:
-            body["description"] = str(
-                description
-            )
-
-        if location:
-            body["location"] = str(
-                location
-            )
-
-        event = (
-            _get_google_calendar_service()
-            .events()
-            .insert(
-                calendarId=calendar_id,
-                body=body,
-            )
-            .execute()
-        )
-
-        return _google_calendar_event_to_dict(
-            event,
-            calendar_id,
-        )
-
-    def google_calendar_mark_completed(event_id, completed=True, calendar_id="primary"):
-        """Avelia独自の完了状態をGoogle Calendar private extendedPropertiesへ保存する。"""
-        event_id = str(event_id).strip()
-        if not event_id:
-            raise ValueError("event_idが空です。")
-        service = _get_google_calendar_service()
-        event = service.events().get(calendarId=calendar_id, eventId=event_id).execute()
-        ext = dict(event.get("extendedProperties", {}))
-        private = dict(ext.get("private", {}))
-        private["avelia_completed"] = "1" if bool(completed) else "0"
-        ext["private"] = private
-        updated = service.events().patch(
-            calendarId=calendar_id, eventId=event_id, body={"extendedProperties": ext}
-        ).execute()
-        return {"success": True, "event": _google_calendar_event_to_dict(updated, calendar_id)}
-
-
-    def google_calendar_update_event(
-        event_id,
-        title=None,
-        start=None,
-        end=None,
-        description=None,
-        location=None,
-        calendar_id="primary",
-    ):
-        event_id = str(event_id).strip()
-        if not event_id:
-            raise ValueError("event_idが空です。")
-
-        body = {}
-        if title is not None:
-            title = str(title).strip()
-            if not title:
-                raise ValueError("予定タイトルが空です。")
-            body["summary"] = title
-        if description is not None:
-            body["description"] = str(description)
-        if location is not None:
-            body["location"] = str(location)
-        if start is not None:
-            start_dt = _google_calendar_datetime(start)
-            body["start"] = {
-                "dateTime": start_dt.isoformat(),
-                "timeZone": GOOGLE_CALENDAR_TIMEZONE,
-            }
-        if end is not None:
-            end_dt = _google_calendar_datetime(end)
-            body["end"] = {
-                "dateTime": end_dt.isoformat(),
-                "timeZone": GOOGLE_CALENDAR_TIMEZONE,
-            }
-        if not body:
-            raise ValueError("変更内容がありません。")
-
-        event = _get_google_calendar_service().events().patch(
-            calendarId=calendar_id,
-            eventId=event_id,
-            body=body,
-        ).execute()
-        return _google_calendar_event_to_dict(event, calendar_id)
-
-
-    def google_calendar_delete_event(event_id, calendar_id="primary"):
-        event_id = str(event_id).strip()
-        if not event_id:
-            raise ValueError("event_idが空です。")
-        _get_google_calendar_service().events().delete(
-            calendarId=calendar_id,
-            eventId=event_id,
-        ).execute()
-        return {"success": True, "deleted_event_id": event_id}
-
-
-    def google_calendar_list_calendars():
-        service = _get_google_calendar_service()
-        result_items = []
-        page_token = None
-        while True:
-            result = service.calendarList().list(pageToken=page_token).execute()
-            for item in result.get("items", []):
-                result_items.append({
-                    "id": item.get("id"),
-                    "summary": item.get("summary"),
-                    "primary": bool(item.get("primary", False)),
-                    "access_role": item.get("accessRole"),
-                    "timezone": item.get("timeZone"),
-                })
-            page_token = result.get("nextPageToken")
-            if not page_token:
-                break
-        return result_items
-
-
-    def google_calendar_auth_status():
-        """Google Calendarの認証状態を返す。"""
-        if not GOOGLE_CALENDAR_TOKEN_FILE.is_file():
-            return {
-                "success": True,
-                "authenticated": False,
-                "reason": "token_not_found",
-            }
-
-        try:
-            _get_google_calendar_service()
-            return {
-                "success": True,
-                "authenticated": True,
-            }
-        except Exception as e:
-            return {
-                "success": True,
-                "authenticated": False,
-                "reason": str(e),
-            }
-
-
-    def google_calendar_authenticate():
-        """現在のAveliaセッション内でGoogle OAuth認証を実行する。"""
-        global _google_calendar_service_cache
-
-        result = _run_google_calendar_auth()
-
-        # 認証前のserviceを保持していた場合に備えて破棄する。
-        _google_calendar_service_cache = None
-
-        # 保存直後にAPI clientを構築してtokenの利用可否まで確認する。
-        _get_google_calendar_service()
-
-        return result
-
-
-    def _google_calendar_tool_schemas():
-        nullable_string = {"type": ["string", "null"]}
-        return [
-            {
-                "type": "function",
-                "name": "google_calendar_auth_status",
-                "description": (
-                    "Google CalendarのOAuth認証状態を確認する。"
-                    "認証操作は行わない。"
-                ),
-                "strict": True,
-                "parameters": {
-                    "type": "object",
-                    "properties": {},
-                    "required": [],
-                    "additionalProperties": False,
-                },
-            },
-            {
-                "type": "function",
-                "name": "google_calendar_authenticate",
-                "description": (
-                    "ユーザーがGoogle Calendarの接続、認証、再認証を明示的に依頼した場合のみ使用する。"
-                    "Avelia本体内部でOAuth認証URLを表示し、認証完了後にtokenを保存する。"
-                ),
-                "strict": True,
-                "parameters": {
-                    "type": "object",
-                    "properties": {},
-                    "required": [],
-                    "additionalProperties": False,
-                },
-            },
-            {
-                "type": "function",
-                "name": "google_calendar_get_event",
-                "description": (
-                    "Google CalendarからイベントIDを指定して"
-                    "予定を1件取得する。"
-                ),
-                "strict": True,
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "event_id": {
-                            "type": "string",
-                            "description": "Google CalendarイベントID",
-                        },
-                        "calendar_id": {
-                            "type": "string",
-                            "description": "通常はprimary",
-                        },
-                    },
-                    "required": [
-                        "event_id",
-                        "calendar_id",
-                    ],
-                    "additionalProperties": False,
-                },
-            },
-            {
-                "type": "function",
-                "name": "google_calendar_get_upcoming",
-                "description": (
-                    "Google Calendarから現在以降の予定を取得する。"
-                    "『今後の予定』『次の予定』『1週間の予定』などに使用する。"
-                ),
-                "strict": True,
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "days": {
-                            "type": "integer",
-                            "minimum": 1,
-                            "maximum": 3650,
-                        },
-                        "max_results": {
-                            "type": "integer",
-                            "minimum": 1,
-                            "maximum": 10000,
-                        },
-                        "include_completed": {
-                            "type": "boolean",
-                        },
-                        "calendar_id": {
-                            "type": "string",
-                        },
-                    },
-                    "required": [
-                        "days",
-                        "max_results",
-                        "include_completed",
-                        "calendar_id",
-                    ],
-                    "additionalProperties": False,
-                },
-            },
-            {
-                "type": "function",
-                "name": "google_calendar_get_date",
-                "description": "Google Calendarから指定日の予定を取得する。今日や明日も実際の日付YYYY-MM-DDに変換して指定する。",
-                "strict": True,
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "scheduled_date": {"type": "string", "description": "YYYY-MM-DD"},
-                        "calendar_id": {"type": "string", "description": "通常はprimary"},
-                    },
-                    "required": ["scheduled_date", "calendar_id"],
-                    "additionalProperties": False,
-                },
-            },
-            {
-                "type": "function",
-                "name": "google_calendar_search",
-                "description": "Google Calendarから期間内の予定をキーワード検索する。",
-                "strict": True,
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "query": {"type": "string"},
-                        "start": {"type": "string", "description": "ISO日時"},
-                        "end": {"type": "string", "description": "ISO日時"},
-                        "calendar_id": {"type": "string"},
-                    },
-                    "required": ["query", "start", "end", "calendar_id"],
-                    "additionalProperties": False,
-                },
-            },
-            {
-                "type": "function",
-                "name": "google_calendar_create",
-                "description": "Google Calendarへ時刻付き予定を追加する。",
-                "strict": True,
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "title": {"type": "string"},
-                        "start": {"type": "string", "description": "YYYY-MM-DD HH:MMまたはISO日時"},
-                        "end": nullable_string,
-                        "duration_minutes": {"type": "integer", "minimum": 1, "maximum": 10080},
-                        "description": nullable_string,
-                        "location": nullable_string,
-                        "calendar_id": {"type": "string"},
-                    },
-                    "required": ["title", "start", "end", "duration_minutes", "description", "location", "calendar_id"],
-                    "additionalProperties": False,
-                },
-            },
-            {
-                "type": "function",
-                "name": "google_calendar_create_all_day",
-                "description": "Google Calendarへ終日予定を追加する。",
-                "strict": True,
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "title": {"type": "string"},
-                        "scheduled_date": {"type": "string", "description": "YYYY-MM-DD"},
-                        "end_date": nullable_string,
-                        "description": nullable_string,
-                        "location": nullable_string,
-                        "calendar_id": {"type": "string"},
-                    },
-                    "required": ["title", "scheduled_date", "end_date", "description", "location", "calendar_id"],
-                    "additionalProperties": False,
-                },
-            },
-            {
-                "type": "function",
-                "name": "google_calendar_create_weekly",
-                "description": "Google Calendarへ曜日指定の毎週繰り返し予定を追加する。曜日は月0〜日6。",
-                "strict": True,
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "title": {"type": "string"},
-                        "weekdays": {"type": "array", "items": {"type": "integer", "minimum": 0, "maximum": 6}},
-                        "start_time": {"type": ["string", "null"]},
-                        "end_time": nullable_string,
-                        "description": nullable_string,
-                        "location": nullable_string,
-                        "start_date": nullable_string,
-                        "calendar_id": {"type": "string"},
-                    },
-                    "required": ["title", "weekdays", "start_time", "end_time", "description", "location", "start_date", "calendar_id"],
-                    "additionalProperties": False,
-                },
-            },
-            {
-                "type": "function",
-                "name": "google_calendar_mark_completed",
-                "description": "Google Calendar予定のAvelia完了状態を変更する。",
-                "strict": True,
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "event_id": {"type": "string"},
-                        "completed": {"type": "boolean"},
-                        "calendar_id": {"type": "string"},
-                    },
-                    "required": ["event_id", "completed", "calendar_id"],
-                    "additionalProperties": False,
-                },
-            },
-            {
-                "type": "function",
-                "name": "google_calendar_update",
-                "description": "Google Calendarの既存予定をevent_idで部分更新する。削除や変更前に検索で対象を特定する。",
-                "strict": True,
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "event_id": {"type": "string"},
-                        "title": nullable_string,
-                        "start": nullable_string,
-                        "end": nullable_string,
-                        "description": nullable_string,
-                        "location": nullable_string,
-                        "calendar_id": {"type": "string"},
-                    },
-                    "required": ["event_id", "title", "start", "end", "description", "location", "calendar_id"],
-                    "additionalProperties": False,
-                },
-            },
-            {
-                "type": "function",
-                "name": "google_calendar_delete",
-                "description": "Google Calendarの予定をevent_idで削除する。対象が曖昧な場合は先に検索して特定する。",
-                "strict": True,
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "event_id": {"type": "string"},
-                        "calendar_id": {"type": "string"},
-                    },
-                    "required": ["event_id", "calendar_id"],
-                    "additionalProperties": False,
-                },
-            },
-            {
-                "type": "function",
-                "name": "google_calendar_list_calendars",
-                "description": "Googleアカウントから利用可能なカレンダー一覧を取得する。",
-                "strict": True,
-                "parameters": {
-                    "type": "object",
-                    "properties": {},
-                    "required": [],
-                    "additionalProperties": False,
-                },
-            },
-        ]
-
-
-    def _execute_google_calendar_tool(tool_name, arguments):
-        if tool_name == "google_calendar_auth_status":
-            return google_calendar_auth_status()
-
-        if tool_name == "google_calendar_authenticate":
-            return google_calendar_authenticate()
-
-        calendar_id = arguments.get("calendar_id") or "primary"
-
-        if tool_name == "google_calendar_get_event":
-            event = google_calendar_get_event(
-                arguments["event_id"],
-                calendar_id=calendar_id,
-            )
-            return {
-                "success": True,
-                "event": event,
-            }
-
-        if tool_name == "google_calendar_get_upcoming":
-            events = google_calendar_get_upcoming(
-                days=arguments["days"],
-                calendar_id=calendar_id,
-                max_results=arguments["max_results"],
-                include_completed=arguments[
-                    "include_completed"
-                ],
-            )
-            return {
-                "success": True,
-                "count": len(events),
-                "events": events,
-            }
-
-        if tool_name == "google_calendar_get_date":
-            events = google_calendar_get_date(
-                arguments["scheduled_date"],
-                calendar_id=calendar_id,
-                include_completed=True,
-            )
-            return {
-                "success": True,
-                "count": len(events),
-                "events": events,
-            }
-
-        if tool_name == "google_calendar_search":
-            events = google_calendar_list_events(
-                start=arguments["start"],
-                end=arguments["end"],
-                query=arguments["query"],
-                calendar_id=calendar_id,
-                max_results=10000,
-                include_completed=True,
-            )
-            return {"success": True, "count": len(events), "events": events}
-
-        if tool_name == "google_calendar_create":
-            event = google_calendar_create_event(
-                title=arguments["title"],
-                start=arguments["start"],
-                end=arguments.get("end"),
-                duration_minutes=arguments.get("duration_minutes", 60),
-                description=arguments.get("description"),
-                location=arguments.get("location"),
-                calendar_id=calendar_id,
-            )
-            return {"success": True, "event": event}
-
-        if tool_name == "google_calendar_create_all_day":
-            event = google_calendar_create_all_day(
-                title=arguments["title"],
-                scheduled_date=arguments["scheduled_date"],
-                end_date=arguments.get("end_date"),
-                description=arguments.get("description"),
-                location=arguments.get("location"),
-                calendar_id=calendar_id,
-            )
-            return {"success": True, "event": event}
-
-        if tool_name == "google_calendar_create_weekly":
-            event = google_calendar_create_weekly(
-                title=arguments["title"], weekdays=arguments["weekdays"],
-                start_time=arguments["start_time"], end_time=arguments.get("end_time"),
-                description=arguments.get("description"), location=arguments.get("location"),
-                calendar_id=calendar_id, start_date=arguments.get("start_date"),
-            )
-            return {"success": True, "event": event}
-
-        if tool_name == "google_calendar_mark_completed":
-            return google_calendar_mark_completed(
-                arguments["event_id"], completed=arguments["completed"], calendar_id=calendar_id
-            )
-
-        if tool_name == "google_calendar_update":
-            event = google_calendar_update_event(
-                event_id=arguments["event_id"],
-                title=arguments.get("title"),
-                start=arguments.get("start"),
-                end=arguments.get("end"),
-                description=arguments.get("description"),
-                location=arguments.get("location"),
-                calendar_id=calendar_id,
-            )
-            return {"success": True, "event": event}
-
-        if tool_name == "google_calendar_delete":
-            return google_calendar_delete_event(
-                arguments["event_id"],
-                calendar_id=calendar_id,
-            )
-
-        if tool_name == "google_calendar_list_calendars":
-            calendars = google_calendar_list_calendars()
-            return {"success": True, "count": len(calendars), "calendars": calendars}
-
-        raise ValueError(f"未対応のGoogle Calendar Toolです: {tool_name}")
-
     MEMORY_KEY_FILE = os.path.join(
         DATA_DIR,
         "memory.key"
@@ -2716,115 +2452,6 @@ if _AVELIA_MODE == "daemon":
             return False
 
 
-    def purge_schedule_calendar_execution_history():
-        """
-        execution_history.jsonl から
-        予定・カレンダー系Toolの過去履歴を削除する。
-
-        Google Calendar移行前のDB由来予定を
-        後から参照してしまう事故を防ぐ。
-        """
-        import json
-
-        if not EXEC_HISTORY_FILE.is_file():
-            return {
-                "success": True,
-                "removed": 0,
-                "kept": 0,
-            }
-
-        kept = []
-        removed = 0
-
-        try:
-            with open(
-                EXEC_HISTORY_FILE,
-                "r",
-                encoding="utf-8"
-            ) as f:
-
-                for line in f:
-                    line = line.strip()
-
-                    if not line:
-                        continue
-
-                    try:
-                        record = json.loads(
-                            line
-                        )
-                    except json.JSONDecodeError:
-                        # 壊れた行はそのまま捨てる。
-                        continue
-
-                    if not isinstance(
-                        record,
-                        dict,
-                    ):
-                        continue
-
-                    if _is_schedule_or_calendar_tool(
-                        record.get(
-                            "tool",
-                            ""
-                        )
-                    ):
-                        removed += 1
-                        continue
-
-                    kept.append(
-                        record
-                    )
-
-            temp_file = (
-                EXEC_HISTORY_FILE
-                .with_suffix(
-                    ".jsonl.tmp"
-                )
-            )
-
-            with open(
-                temp_file,
-                "w",
-                encoding="utf-8"
-            ) as f:
-
-                for record in kept:
-                    f.write(
-                        json.dumps(
-                            record,
-                            ensure_ascii=False,
-                            default=str,
-                        )
-                        + "\n"
-                    )
-
-                f.flush()
-                os.fsync(
-                    f.fileno()
-                )
-
-            os.replace(
-                temp_file,
-                EXEC_HISTORY_FILE,
-            )
-
-            return {
-                "success": True,
-                "removed": removed,
-                "kept": len(kept),
-            }
-
-        except Exception as e:
-            return {
-                "success": False,
-                "removed": removed,
-                "kept": len(kept),
-                "error":
-                    f"{type(e).__name__}: {e}",
-            }
-
-
     def load_execution_history(limit=20):
         """
         最近のTool実行履歴を取得する。
@@ -2867,99 +2494,23 @@ if _AVELIA_MODE == "daemon":
         return records[-limit:]
 
 
-    def _is_schedule_or_calendar_tool(tool_name):
-        """
-        予定・カレンダー系Toolか判定する。
-
-        Google Calendar移行前のDB取得結果が
-        execution_history.jsonl に残っていても、
-        現在の予定情報としてSystem Promptへ再注入しないために使う。
-        """
-        name = str(
-            tool_name
-            or ""
-        ).strip()
-
-        if name.startswith(
-            "google_calendar_"
-        ):
-            return True
-
-        return name in {
-            "add_schedule",
-            "get_schedules",
-            "delete_schedule",
-            "calendar_add_once",
-            "calendar_add_weekly",
-            "calendar_get_today",
-            "calendar_get_date",
-            "calendar_complete_once",
-            "calendar_complete_weekly",
-            "calendar_delete_once",
-            "calendar_delete_weekly",
-            "calendar_import_csv",
-        }
-
-
     def get_execution_history_context(limit=20):
         """
         System Promptへ渡すための実行履歴文字列を作成する。
-
-        予定・カレンダー系の履歴は除外する。
-        予定情報は鮮度が重要であり、過去のTool結果を
-        現在の予定として再利用してはいけない。
-
-        現在の予定を回答するときは必ずGoogle Calendar Toolを
-        その場で実行して取得する。
         """
         import json
 
-        # 予定系履歴を除いたうえでlimit件確保できるよう
-        # 少し多めに読む。
-        raw_records = load_execution_history(
-            max(
-                int(limit) * 5,
-                50,
-            )
-        )
-
-        records = [
-            record
-            for record in raw_records
-            if not _is_schedule_or_calendar_tool(
-                record.get(
-                    "tool",
-                    ""
-                )
-            )
-        ]
-
-        if limit > 0:
-            records = records[
-                -int(limit):
-            ]
-        else:
-            records = []
-
-        schedule_policy = (
-            "重要: 予定・Google Calendar情報については、"
-            "過去のTool実行履歴や会話中の古い予定情報を"
-            "現在の予定として使用してはいけません。"
-            "予定の追加・取得・検索・更新・削除・完了状態を"
-            "確認する必要がある場合は、必ず現在の"
-            "Google Calendar Toolを実行し、その結果だけを"
-            "現在の予定情報として扱ってください。\n"
-        )
+        records = load_execution_history(limit)
 
         if not records:
             return (
-                schedule_policy
-                + "予定系以外のTool実行履歴はありません。"
+                "Tool実行履歴はありません。"
+                "履歴がないことだけを理由に、"
+                "過去の会話内容が誤りだったと断定しないでください。"
             )
 
         return (
-            schedule_policy
-            + "以下は予定系を除外した実際のTool実行履歴です。\n"
+            "以下は実際に記録されたTool実行履歴です。\n"
             "過去のコマンド・Tool実行について判断する場合は、"
             "会話上の推測よりこの記録を優先してください。\n"
             "履歴に存在しない場合は「実行記録からは確認できません」"
@@ -2984,38 +2535,6 @@ if _AVELIA_MODE == "daemon":
         os.remove("/opt/Anvelk-Mainframe/data/memory.key")
         os.remove("/opt/Anvelk-Mainframe/data/memory.vlm.sha256")
     
-    # =========================================================
-    # Google Calendar移行後の旧予定Tool履歴を掃除
-    # =========================================================
-
-    try:
-        _schedule_history_cleanup = (
-            purge_schedule_calendar_execution_history()
-        )
-
-        if (
-            _schedule_history_cleanup.get(
-                "success"
-            )
-            and _schedule_history_cleanup.get(
-                "removed",
-                0
-            ) > 0
-        ):
-            print(
-                "[Avelia] 旧予定Tool履歴を削除: "
-                f"{_schedule_history_cleanup['removed']}件",
-                flush=True,
-            )
-
-    except Exception as e:
-        print(
-            "[Avelia] 旧予定Tool履歴の削除に失敗: "
-            f"{type(e).__name__}: {e}",
-            flush=True,
-        )
-
-
     # =========================================================
     # MySQL設定チェック
     # =========================================================
@@ -3226,11 +2745,6 @@ if _AVELIA_MODE == "daemon":
             f"ユーザーの名前を呼ぶときは、必ず「{real_name}さん」と呼んでください。"
             f"最終ログイン日時は{last_login}です。"
             f"学習機能は{('有効' if learning_enabled_keyword else '無効')} です。"
-            "現在の予定・スケジュール・Google Calendarの内容を尋ねられた場合、"
-            "記憶・過去会話・過去のTool結果だけで回答せず、"
-            "必ずGoogle Calendar取得Toolを実行して最新情報を確認してください。"
-            "Google Calendar Toolが返していない予定を、現在存在する予定として"
-            "補完・推測・復元してはいけません。"
             f"{execution_context}"
             f"現在時刻は{current_date}です。"
             f"{session_msg}"
@@ -4356,7 +3870,7 @@ if _AVELIA_MODE == "daemon":
 
     def _schedule_tools():
         """通常会話でアヴェリアに公開するResponses API用Tool。"""
-        return _google_calendar_tool_schemas() + [{
+        return [{
         "type": "function",
         "name": "ocr_image",
         "description": (
@@ -4700,14 +4214,14 @@ if _AVELIA_MODE == "daemon":
             {
                 "type": "function",
                 "name": "get_schedules",
-                "description": "Google Calendarから今後のスケジュール予定を取得します。旧互換Toolです。",
+                "description": "登録されているスケジュール予定を一覧表示するために取得します。",
                 "strict": True,
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "include_used": {
                             "type": "boolean",
-                            "description": "旧互換引数。trueならAvelia完了済み予定も含める"
+                            "description": "trueなら通知済み予定も含める"
                         }
                     },
                     "required": ["include_used"],
@@ -4717,14 +4231,14 @@ if _AVELIA_MODE == "daemon":
             {
                 "type": "function",
                 "name": "delete_schedule",
-                "description": "指定したGoogle CalendarイベントIDのスケジュールを削除します。",
+                "description": "指定IDのスケジュールを削除します。",
                 "strict": True,
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "schedule_id": {
-                            "type": "string",
-                            "description": "削除するGoogle CalendarイベントID"
+                            "type": "integer",
+                            "description": "削除するスケジュールID"
                         }
                     },
                     "required": ["schedule_id"],
@@ -4890,7 +4404,7 @@ if _AVELIA_MODE == "daemon":
             "calendar_complete_once",
 
         "description":
-            "Google Calendar上の単発予定を完了済みにします。",
+            "単発予定を完了済みにします。",
 
         "strict": True,
 
@@ -4901,8 +4415,7 @@ if _AVELIA_MODE == "daemon":
             "properties": {
 
                 "schedule_id": {
-                    "type": "string",
-                    "description": "Google CalendarイベントID"
+                    "type": "integer"
                 }
             },
 
@@ -4920,7 +4433,7 @@ if _AVELIA_MODE == "daemon":
             "calendar_complete_weekly",
 
         "description": (
-            "Google Calendar上の曜日条件付き定期予定の"
+            "曜日条件付き定期予定の"
             "その日分だけを完了済みにします。"
         ),
 
@@ -4933,8 +4446,7 @@ if _AVELIA_MODE == "daemon":
             "properties": {
 
                 "schedule_id": {
-                    "type": "string",
-                    "description": "Google CalendarイベントID"
+                    "type": "integer"
                 },
 
                 "scheduled_date": {
@@ -5007,9 +4519,9 @@ if _AVELIA_MODE == "daemon":
             "properties": {
 
                 "schedule_id": {
-                    "type": "string",
+                    "type": "integer",
                     "description":
-                        "削除する単発予定のGoogle CalendarイベントID"
+                        "削除する単発予定ID"
                 }
             },
 
@@ -5042,9 +4554,9 @@ if _AVELIA_MODE == "daemon":
             "properties": {
 
                 "schedule_id": {
-                    "type": "string",
+                    "type": "integer",
                     "description":
-                        "削除する定期予定のGoogle CalendarイベントID"
+                        "削除する定期予定ID"
                 }
             },
 
@@ -5334,8 +4846,6 @@ if _AVELIA_MODE == "daemon":
 
     def execute_avelia_tool(tool_name, arguments):
         """OpenAIから要求されたローカルToolを実行する。"""
-        if tool_name.startswith("google_calendar_"):
-            return _execute_google_calendar_tool(tool_name, arguments)
         if tool_name in {tool["name"] for tool in file_signature.tools()}:
             return file_signature.exec(tool_name, arguments)
         if tool_name == "ensec_rsa_file":
@@ -6214,7 +5724,3 @@ if _AVELIA_MODE == "daemon":
 
 elif _AVELIA_MODE == "connect":
     _run_client(_ARGS.host, _ARGS.port)
-
-elif _AVELIA_MODE == "google_calendar_auth":
-    _configure_stdio()
-    _run_google_calendar_auth()
