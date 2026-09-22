@@ -956,34 +956,164 @@ if _AVELIA_MODE == "daemon":
         return event["id"]
 
     def get_schedules(include_used=False):
-        """旧Tool互換。Google Calendarから今後1年の予定を取得する。"""
-        from datetime import datetime, timedelta
-        from zoneinfo import ZoneInfo
-        tz = ZoneInfo(GOOGLE_CALENDAR_TIMEZONE)
-        now = datetime.now(tz)
-        events = google_calendar_list_events(
-            start=now.isoformat(),
-            end=(now + timedelta(days=365)).isoformat(),
+        """
+        旧Tool互換。
+
+        Google Calendarから今後1年の予定を取得する。
+        include_used は旧Tool互換名として残し、
+        TrueならAvelia完了済み予定も含める。
+        Falseなら未完了予定だけを返す。
+
+        通知済み状態そのものはworkerの
+        google_calendar_notify_state.jsonが管理するため、
+        旧message_use列は互換用の値として返す。
+        """
+        events = google_calendar_get_upcoming(
+            days=365,
             calendar_id="primary",
-            max_results=2500,
+            max_results=10000,
+            include_completed=bool(
+                include_used
+            ),
         )
-        return [{
-            "id": e["id"],
-            "title": e["title"],
-            "message": e.get("description", ""),
-            "scheduled_at": e.get("start", ""),
-            "message_use": 0,
-            "created_at": None,
-        } for e in events]
+
+        rows = []
+
+        for event in events:
+            completed = bool(
+                event.get(
+                    "completed",
+                    False,
+                )
+            )
+
+            rows.append(
+                {
+                    "id":
+                        event["id"],
+
+                    "title":
+                        event["title"],
+
+                    "message":
+                        event.get(
+                            "description",
+                            "",
+                        ),
+
+                    "scheduled_at":
+                        event.get(
+                            "start",
+                            "",
+                        ),
+
+                    # 旧レスポンス互換。
+                    # Google Calendar移行後は
+                    # 「完了済み」を1として返す。
+                    "message_use":
+                        1
+                        if completed
+                        else 0,
+
+                    "created_at":
+                        None,
+
+                    "calendar_id":
+                        event.get(
+                            "calendar_id",
+                            "primary",
+                        ),
+
+                    "all_day":
+                        event.get(
+                            "all_day",
+                            False,
+                        ),
+
+                    "recurring_event_id":
+                        event.get(
+                            "recurring_event_id",
+                            "",
+                        ),
+
+                    "completed":
+                        completed,
+
+                    "html_link":
+                        event.get(
+                            "html_link",
+                            "",
+                        ),
+                }
+            )
+
+        return rows
+
 
     def delete_schedule(schedule_id):
-        return bool(google_calendar_delete_event(str(schedule_id), calendar_id="primary").get("success"))
+        return bool(
+            google_calendar_delete_event(
+                str(schedule_id),
+                calendar_id="primary",
+            ).get("success")
+        )
 
     def delete_calendar_once(schedule_id):
-        return delete_schedule(schedule_id)
+        # 単発予定はそのイベント自身を削除する。
+        return delete_schedule(
+            schedule_id
+        )
+
+    def _google_calendar_resolve_series_id(
+        event_id,
+        calendar_id="primary",
+    ):
+        """instance IDならrecurringEventIdを返し、master IDならそのまま返す。"""
+        event_id = str(
+            event_id
+        ).strip()
+
+        if not event_id:
+            raise ValueError(
+                "event_idが空です。"
+            )
+
+        service = (
+            _get_google_calendar_service()
+        )
+
+        event = (
+            service.events()
+            .get(
+                calendarId=calendar_id,
+                eventId=event_id,
+            )
+            .execute()
+        )
+
+        return (
+            event.get(
+                "recurringEventId"
+            )
+            or event_id
+        )
 
     def delete_calendar_weekly(schedule_id):
-        return delete_schedule(schedule_id)
+        # 旧DB版はweekly本体を削除していたため、
+        # expanded instance IDが渡されてもseries masterを削除する。
+        master_id = (
+            _google_calendar_resolve_series_id(
+                schedule_id,
+                calendar_id="primary",
+            )
+        )
+
+        return bool(
+            google_calendar_delete_event(
+                master_id,
+                calendar_id="primary",
+            ).get("success")
+        )
 
     def add_calendar_once(title, scheduled_date, start_time=None, end_time=None, description=None, source="avelia"):
         title = _validate_calendar_title(title)
@@ -1014,19 +1144,112 @@ if _AVELIA_MODE == "daemon":
         return event["id"]
 
     def complete_calendar_once(schedule_id):
-        return bool(google_calendar_mark_completed(str(schedule_id), calendar_id="primary").get("success"))
+        return bool(
+            google_calendar_mark_completed(
+                str(schedule_id),
+                calendar_id="primary",
+            ).get("success")
+        )
 
-    def complete_calendar_weekly(schedule_id, scheduled_date=None):
-        return bool(google_calendar_mark_completed(str(schedule_id), calendar_id="primary").get("success"))
+    def complete_calendar_weekly(
+        schedule_id,
+        scheduled_date=None,
+    ):
+        """
+        定期予定のその1回だけを完了扱いにする。
+
+        get_calendar_date() が返すexpanded instance IDなら
+        そのinstanceだけをpatchする。
+
+        series master IDが渡された場合はscheduled_dateから
+        対象instanceを探してpatchする。
+        """
+        event_id = str(
+            schedule_id
+        ).strip()
+
+        if not event_id:
+            raise ValueError(
+                "schedule_idが空です。"
+            )
+
+        service = (
+            _get_google_calendar_service()
+        )
+
+        event = (
+            service.events()
+            .get(
+                calendarId="primary",
+                eventId=event_id,
+            )
+            .execute()
+        )
+
+        # recurringEventIdがあるなら既に個別instance。
+        if event.get(
+            "recurringEventId"
+        ):
+            target_event_id = event_id
+
+        else:
+            # master eventなら対象日を使ってinstanceを解決する。
+            if scheduled_date is None:
+                raise ValueError(
+                    "定期予定のmaster IDを完了する場合は"
+                    "scheduled_dateが必要です。"
+                )
+
+            target_date = (
+                _normalize_calendar_date(
+                    scheduled_date
+                )
+            )
+
+            events = google_calendar_get_date(
+                target_date.isoformat(),
+                calendar_id="primary",
+            )
+
+            target_event_id = None
+
+            for item in events:
+                if (
+                    item.get(
+                        "recurring_event_id"
+                    )
+                    == event_id
+                ):
+                    target_event_id = (
+                        item.get("id")
+                    )
+                    break
+
+            if not target_event_id:
+                raise ValueError(
+                    "指定日に該当する定期予定の"
+                    "発生回が見つかりません。"
+                )
+
+        return bool(
+            google_calendar_mark_completed(
+                target_event_id,
+                calendar_id="primary",
+            ).get("success")
+        )
 
     def get_calendar_date(target_date=None, unfinished_only=True):
         from datetime import date
         target = date.today() if target_date is None else _normalize_calendar_date(target_date)
-        events = google_calendar_get_date(target.isoformat(), calendar_id="primary")
+        events = google_calendar_get_date(
+            target.isoformat(),
+            calendar_id="primary",
+            include_completed=not bool(
+                unfinished_only
+            ),
+        )
         schedules = []
         for e in events:
-            if unfinished_only and e.get("completed", False):
-                continue
             start = e.get("start", "")
             end = e.get("end", "")
             start_time = None if e.get("all_day") else (start[11:19] if len(start) >= 19 else start[11:])
@@ -1380,50 +1603,246 @@ if _AVELIA_MODE == "daemon":
         query=None,
         calendar_id="primary",
         max_results=100,
+        include_completed=True,
     ):
+        """
+        Google Calendarから期間内イベントを取得する。
+
+        - singleEvents=True で繰り返し予定を各発生回へ展開
+        - nextPageToken を最後まで処理
+        - max_results はAvelia側の総取得上限として扱う
+        - include_completed=False の場合、
+          extendedProperties.private.avelia_completed=1 を除外
+        """
         from datetime import datetime, timedelta
         from zoneinfo import ZoneInfo
 
         service = _get_google_calendar_service()
         tz = ZoneInfo(GOOGLE_CALENDAR_TIMEZONE)
-        start_dt = _google_calendar_datetime(start) if start else datetime.now(tz)
-        end_dt = _google_calendar_datetime(end) if end else start_dt + timedelta(days=30)
 
-        params = {
-            "calendarId": calendar_id,
-            "timeMin": start_dt.isoformat(),
-            "timeMax": end_dt.isoformat(),
-            "singleEvents": True,
-            "orderBy": "startTime",
-            "maxResults": max(1, min(int(max_results), 2500)),
-        }
-        if query:
-            params["q"] = str(query)
+        start_dt = (
+            _google_calendar_datetime(start)
+            if start
+            else datetime.now(tz)
+        )
 
-        result = service.events().list(**params).execute()
-        return [
-            _google_calendar_event_to_dict(item, calendar_id)
-            for item in result.get("items", [])
-            if item.get("status") != "cancelled"
-        ]
+        end_dt = (
+            _google_calendar_datetime(end)
+            if end
+            else start_dt + timedelta(days=30)
+        )
+
+        if end_dt <= start_dt:
+            raise ValueError(
+                "endはstartより後にしてください。"
+            )
+
+        limit = max(
+            1,
+            min(
+                int(max_results),
+                10000,
+            ),
+        )
+
+        events = []
+        page_token = None
+
+        while len(events) < limit:
+            per_page = min(
+                2500,
+                max(
+                    1,
+                    limit - len(events),
+                ),
+            )
+
+            params = {
+                "calendarId": calendar_id,
+                "timeMin": start_dt.isoformat(),
+                "timeMax": end_dt.isoformat(),
+                "singleEvents": True,
+                "orderBy": "startTime",
+                "showDeleted": False,
+                "maxResults": per_page,
+                "timeZone": GOOGLE_CALENDAR_TIMEZONE,
+            }
+
+            if query:
+                params["q"] = str(
+                    query
+                )
+
+            if page_token:
+                params["pageToken"] = (
+                    page_token
+                )
+
+            result = (
+                service.events()
+                .list(
+                    **params
+                )
+                .execute()
+            )
+
+            for item in result.get(
+                "items",
+                [],
+            ):
+                if (
+                    item.get("status")
+                    == "cancelled"
+                ):
+                    continue
+
+                converted = (
+                    _google_calendar_event_to_dict(
+                        item,
+                        calendar_id,
+                    )
+                )
+
+                if (
+                    not include_completed
+                    and converted.get(
+                        "completed",
+                        False,
+                    )
+                ):
+                    continue
+
+                events.append(
+                    converted
+                )
+
+                if len(events) >= limit:
+                    break
+
+            page_token = result.get(
+                "nextPageToken"
+            )
+
+            if not page_token:
+                break
+
+        return events
 
 
-    def google_calendar_get_date(target_date, calendar_id="primary"):
+    def google_calendar_get_event(
+        event_id,
+        calendar_id="primary",
+    ):
+        """
+        Google CalendarイベントをイベントIDで1件取得する。
+        """
+        event_id = str(
+            event_id
+        ).strip()
+
+        if not event_id:
+            raise ValueError(
+                "event_idが空です。"
+            )
+
+        event = (
+            _get_google_calendar_service()
+            .events()
+            .get(
+                calendarId=calendar_id,
+                eventId=event_id,
+            )
+            .execute()
+        )
+
+        return _google_calendar_event_to_dict(
+            event,
+            calendar_id,
+        )
+
+
+    def google_calendar_get_upcoming(
+        days=30,
+        calendar_id="primary",
+        max_results=100,
+        include_completed=False,
+    ):
+        """
+        現在時刻から指定日数先までの予定を取得する。
+        """
+        from datetime import datetime, timedelta
+        from zoneinfo import ZoneInfo
+
+        days = int(
+            days
+        )
+
+        if days < 1:
+            raise ValueError(
+                "daysは1以上にしてください。"
+            )
+
+        tz = ZoneInfo(
+            GOOGLE_CALENDAR_TIMEZONE
+        )
+
+        now = datetime.now(
+            tz
+        )
+
+        return google_calendar_list_events(
+            start=now.isoformat(),
+            end=(
+                now
+                + timedelta(days=days)
+            ).isoformat(),
+            calendar_id=calendar_id,
+            max_results=max_results,
+            include_completed=include_completed,
+        )
+
+
+    def google_calendar_get_date(
+        target_date,
+        calendar_id="primary",
+        include_completed=True,
+    ):
         from datetime import datetime, timedelta
         from zoneinfo import ZoneInfo
 
         try:
-            d = datetime.strptime(str(target_date).strip(), "%Y-%m-%d").date()
-        except ValueError as e:
-            raise ValueError("日付はYYYY-MM-DD形式で指定してください。") from e
+            d = datetime.strptime(
+                str(target_date).strip(),
+                "%Y-%m-%d",
+            ).date()
 
-        tz = ZoneInfo(GOOGLE_CALENDAR_TIMEZONE)
-        start = datetime(d.year, d.month, d.day, tzinfo=tz)
-        end = start + timedelta(days=1)
+        except ValueError as e:
+            raise ValueError(
+                "日付はYYYY-MM-DD形式で指定してください。"
+            ) from e
+
+        tz = ZoneInfo(
+            GOOGLE_CALENDAR_TIMEZONE
+        )
+
+        start = datetime(
+            d.year,
+            d.month,
+            d.day,
+            tzinfo=tz,
+        )
+
+        end = (
+            start
+            + timedelta(days=1)
+        )
+
         return google_calendar_list_events(
             start=start.isoformat(),
             end=end.isoformat(),
             calendar_id=calendar_id,
+            max_results=2500,
+            include_completed=include_completed,
         )
 
 
@@ -1525,31 +1944,121 @@ if _AVELIA_MODE == "daemon":
         """曜日指定の毎週繰り返し予定をGoogle Calendarへ作成する。"""
         from datetime import date, datetime, timedelta
         from zoneinfo import ZoneInfo
+
         title = _validate_calendar_title(title)
+
         weekdays = sorted({int(x) for x in weekdays})
         if not weekdays or any(x < 0 or x > 6 for x in weekdays):
             raise ValueError("weekdaysは0(月)〜6(日)を1つ以上指定してください。")
+
         st, et = _validate_calendar_time_range(start_time, end_time)
+
+        base = (
+            _normalize_calendar_date(start_date)
+            if start_date
+            else date.today()
+        )
+
+        first_date = base + timedelta(
+            days=min(
+                (wd - base.weekday()) % 7
+                for wd in weekdays
+            )
+        )
+
+        codes = [
+            "MO", "TU", "WE", "TH",
+            "FR", "SA", "SU"
+        ]
+
+        recurrence = [
+            "RRULE:FREQ=WEEKLY;BYDAY="
+            + ",".join(
+                codes[x]
+                for x in weekdays
+            )
+        ]
+
+        # start_time=None は旧calendar_weeklyの仕様に合わせ、
+        # 終日の毎週予定としてGoogle Calendarへ登録する。
         if st is None:
-            raise ValueError("毎週予定にはstart_timeが必要です。")
-        base = _normalize_calendar_date(start_date) if start_date else date.today()
-        first_date = base + timedelta(days=min((wd - base.weekday()) % 7 for wd in weekdays))
-        tz = ZoneInfo(GOOGLE_CALENDAR_TIMEZONE)
-        start_dt = datetime.combine(first_date, st, tzinfo=tz)
-        end_dt = datetime.combine(first_date, et, tzinfo=tz) if et else start_dt + timedelta(hours=1)
-        codes = ["MO", "TU", "WE", "TH", "FR", "SA", "SU"]
-        body = {
-            "summary": title,
-            "start": {"dateTime": start_dt.isoformat(), "timeZone": GOOGLE_CALENDAR_TIMEZONE},
-            "end": {"dateTime": end_dt.isoformat(), "timeZone": GOOGLE_CALENDAR_TIMEZONE},
-            "recurrence": ["RRULE:FREQ=WEEKLY;BYDAY=" + ",".join(codes[x] for x in weekdays)],
-        }
+            body = {
+                "summary": title,
+                "start": {
+                    "date": first_date.isoformat()
+                },
+                "end": {
+                    "date": (
+                        first_date
+                        + timedelta(days=1)
+                    ).isoformat()
+                },
+                "recurrence": recurrence,
+            }
+
+        else:
+            tz = ZoneInfo(
+                GOOGLE_CALENDAR_TIMEZONE
+            )
+
+            start_dt = datetime.combine(
+                first_date,
+                st,
+                tzinfo=tz,
+            )
+
+            end_dt = (
+                datetime.combine(
+                    first_date,
+                    et,
+                    tzinfo=tz,
+                )
+                if et
+                else start_dt
+                + timedelta(hours=1)
+            )
+
+            body = {
+                "summary": title,
+                "start": {
+                    "dateTime":
+                        start_dt.isoformat(),
+                    "timeZone":
+                        GOOGLE_CALENDAR_TIMEZONE,
+                },
+                "end": {
+                    "dateTime":
+                        end_dt.isoformat(),
+                    "timeZone":
+                        GOOGLE_CALENDAR_TIMEZONE,
+                },
+                "recurrence": recurrence,
+            }
+
         if description:
-            body["description"] = str(description)
+            body["description"] = str(
+                description
+            )
+
         if location:
-            body["location"] = str(location)
-        event = _get_google_calendar_service().events().insert(calendarId=calendar_id, body=body).execute()
-        return _google_calendar_event_to_dict(event, calendar_id)
+            body["location"] = str(
+                location
+            )
+
+        event = (
+            _get_google_calendar_service()
+            .events()
+            .insert(
+                calendarId=calendar_id,
+                body=body,
+            )
+            .execute()
+        )
+
+        return _google_calendar_event_to_dict(
+            event,
+            calendar_id,
+        )
 
     def google_calendar_mark_completed(event_id, completed=True, calendar_id="primary"):
         """Avelia独自の完了状態をGoogle Calendar private extendedPropertiesへ保存する。"""
@@ -1718,6 +2227,70 @@ if _AVELIA_MODE == "daemon":
             },
             {
                 "type": "function",
+                "name": "google_calendar_get_event",
+                "description": (
+                    "Google CalendarからイベントIDを指定して"
+                    "予定を1件取得する。"
+                ),
+                "strict": True,
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "event_id": {
+                            "type": "string",
+                            "description": "Google CalendarイベントID",
+                        },
+                        "calendar_id": {
+                            "type": "string",
+                            "description": "通常はprimary",
+                        },
+                    },
+                    "required": [
+                        "event_id",
+                        "calendar_id",
+                    ],
+                    "additionalProperties": False,
+                },
+            },
+            {
+                "type": "function",
+                "name": "google_calendar_get_upcoming",
+                "description": (
+                    "Google Calendarから現在以降の予定を取得する。"
+                    "『今後の予定』『次の予定』『1週間の予定』などに使用する。"
+                ),
+                "strict": True,
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "days": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "maximum": 3650,
+                        },
+                        "max_results": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "maximum": 10000,
+                        },
+                        "include_completed": {
+                            "type": "boolean",
+                        },
+                        "calendar_id": {
+                            "type": "string",
+                        },
+                    },
+                    "required": [
+                        "days",
+                        "max_results",
+                        "include_completed",
+                        "calendar_id",
+                    ],
+                    "additionalProperties": False,
+                },
+            },
+            {
+                "type": "function",
                 "name": "google_calendar_get_date",
                 "description": "Google Calendarから指定日の予定を取得する。今日や明日も実際の日付YYYY-MM-DDに変換して指定する。",
                 "strict": True,
@@ -1797,7 +2370,7 @@ if _AVELIA_MODE == "daemon":
                     "properties": {
                         "title": {"type": "string"},
                         "weekdays": {"type": "array", "items": {"type": "integer", "minimum": 0, "maximum": 6}},
-                        "start_time": {"type": "string"},
+                        "start_time": {"type": ["string", "null"]},
                         "end_time": nullable_string,
                         "description": nullable_string,
                         "location": nullable_string,
@@ -1883,12 +2456,42 @@ if _AVELIA_MODE == "daemon":
 
         calendar_id = arguments.get("calendar_id") or "primary"
 
+        if tool_name == "google_calendar_get_event":
+            event = google_calendar_get_event(
+                arguments["event_id"],
+                calendar_id=calendar_id,
+            )
+            return {
+                "success": True,
+                "event": event,
+            }
+
+        if tool_name == "google_calendar_get_upcoming":
+            events = google_calendar_get_upcoming(
+                days=arguments["days"],
+                calendar_id=calendar_id,
+                max_results=arguments["max_results"],
+                include_completed=arguments[
+                    "include_completed"
+                ],
+            )
+            return {
+                "success": True,
+                "count": len(events),
+                "events": events,
+            }
+
         if tool_name == "google_calendar_get_date":
             events = google_calendar_get_date(
                 arguments["scheduled_date"],
                 calendar_id=calendar_id,
+                include_completed=True,
             )
-            return {"success": True, "count": len(events), "events": events}
+            return {
+                "success": True,
+                "count": len(events),
+                "events": events,
+            }
 
         if tool_name == "google_calendar_search":
             events = google_calendar_list_events(
@@ -1896,6 +2499,8 @@ if _AVELIA_MODE == "daemon":
                 end=arguments["end"],
                 query=arguments["query"],
                 calendar_id=calendar_id,
+                max_results=10000,
+                include_completed=True,
             )
             return {"success": True, "count": len(events), "events": events}
 
@@ -2111,6 +2716,115 @@ if _AVELIA_MODE == "daemon":
             return False
 
 
+    def purge_schedule_calendar_execution_history():
+        """
+        execution_history.jsonl から
+        予定・カレンダー系Toolの過去履歴を削除する。
+
+        Google Calendar移行前のDB由来予定を
+        後から参照してしまう事故を防ぐ。
+        """
+        import json
+
+        if not EXEC_HISTORY_FILE.is_file():
+            return {
+                "success": True,
+                "removed": 0,
+                "kept": 0,
+            }
+
+        kept = []
+        removed = 0
+
+        try:
+            with open(
+                EXEC_HISTORY_FILE,
+                "r",
+                encoding="utf-8"
+            ) as f:
+
+                for line in f:
+                    line = line.strip()
+
+                    if not line:
+                        continue
+
+                    try:
+                        record = json.loads(
+                            line
+                        )
+                    except json.JSONDecodeError:
+                        # 壊れた行はそのまま捨てる。
+                        continue
+
+                    if not isinstance(
+                        record,
+                        dict,
+                    ):
+                        continue
+
+                    if _is_schedule_or_calendar_tool(
+                        record.get(
+                            "tool",
+                            ""
+                        )
+                    ):
+                        removed += 1
+                        continue
+
+                    kept.append(
+                        record
+                    )
+
+            temp_file = (
+                EXEC_HISTORY_FILE
+                .with_suffix(
+                    ".jsonl.tmp"
+                )
+            )
+
+            with open(
+                temp_file,
+                "w",
+                encoding="utf-8"
+            ) as f:
+
+                for record in kept:
+                    f.write(
+                        json.dumps(
+                            record,
+                            ensure_ascii=False,
+                            default=str,
+                        )
+                        + "\n"
+                    )
+
+                f.flush()
+                os.fsync(
+                    f.fileno()
+                )
+
+            os.replace(
+                temp_file,
+                EXEC_HISTORY_FILE,
+            )
+
+            return {
+                "success": True,
+                "removed": removed,
+                "kept": len(kept),
+            }
+
+        except Exception as e:
+            return {
+                "success": False,
+                "removed": removed,
+                "kept": len(kept),
+                "error":
+                    f"{type(e).__name__}: {e}",
+            }
+
+
     def load_execution_history(limit=20):
         """
         最近のTool実行履歴を取得する。
@@ -2153,23 +2867,99 @@ if _AVELIA_MODE == "daemon":
         return records[-limit:]
 
 
+    def _is_schedule_or_calendar_tool(tool_name):
+        """
+        予定・カレンダー系Toolか判定する。
+
+        Google Calendar移行前のDB取得結果が
+        execution_history.jsonl に残っていても、
+        現在の予定情報としてSystem Promptへ再注入しないために使う。
+        """
+        name = str(
+            tool_name
+            or ""
+        ).strip()
+
+        if name.startswith(
+            "google_calendar_"
+        ):
+            return True
+
+        return name in {
+            "add_schedule",
+            "get_schedules",
+            "delete_schedule",
+            "calendar_add_once",
+            "calendar_add_weekly",
+            "calendar_get_today",
+            "calendar_get_date",
+            "calendar_complete_once",
+            "calendar_complete_weekly",
+            "calendar_delete_once",
+            "calendar_delete_weekly",
+            "calendar_import_csv",
+        }
+
+
     def get_execution_history_context(limit=20):
         """
         System Promptへ渡すための実行履歴文字列を作成する。
+
+        予定・カレンダー系の履歴は除外する。
+        予定情報は鮮度が重要であり、過去のTool結果を
+        現在の予定として再利用してはいけない。
+
+        現在の予定を回答するときは必ずGoogle Calendar Toolを
+        その場で実行して取得する。
         """
         import json
 
-        records = load_execution_history(limit)
+        # 予定系履歴を除いたうえでlimit件確保できるよう
+        # 少し多めに読む。
+        raw_records = load_execution_history(
+            max(
+                int(limit) * 5,
+                50,
+            )
+        )
+
+        records = [
+            record
+            for record in raw_records
+            if not _is_schedule_or_calendar_tool(
+                record.get(
+                    "tool",
+                    ""
+                )
+            )
+        ]
+
+        if limit > 0:
+            records = records[
+                -int(limit):
+            ]
+        else:
+            records = []
+
+        schedule_policy = (
+            "重要: 予定・Google Calendar情報については、"
+            "過去のTool実行履歴や会話中の古い予定情報を"
+            "現在の予定として使用してはいけません。"
+            "予定の追加・取得・検索・更新・削除・完了状態を"
+            "確認する必要がある場合は、必ず現在の"
+            "Google Calendar Toolを実行し、その結果だけを"
+            "現在の予定情報として扱ってください。\n"
+        )
 
         if not records:
             return (
-                "Tool実行履歴はありません。"
-                "履歴がないことだけを理由に、"
-                "過去の会話内容が誤りだったと断定しないでください。"
+                schedule_policy
+                + "予定系以外のTool実行履歴はありません。"
             )
 
         return (
-            "以下は実際に記録されたTool実行履歴です。\n"
+            schedule_policy
+            + "以下は予定系を除外した実際のTool実行履歴です。\n"
             "過去のコマンド・Tool実行について判断する場合は、"
             "会話上の推測よりこの記録を優先してください。\n"
             "履歴に存在しない場合は「実行記録からは確認できません」"
@@ -2194,6 +2984,38 @@ if _AVELIA_MODE == "daemon":
         os.remove("/opt/Anvelk-Mainframe/data/memory.key")
         os.remove("/opt/Anvelk-Mainframe/data/memory.vlm.sha256")
     
+    # =========================================================
+    # Google Calendar移行後の旧予定Tool履歴を掃除
+    # =========================================================
+
+    try:
+        _schedule_history_cleanup = (
+            purge_schedule_calendar_execution_history()
+        )
+
+        if (
+            _schedule_history_cleanup.get(
+                "success"
+            )
+            and _schedule_history_cleanup.get(
+                "removed",
+                0
+            ) > 0
+        ):
+            print(
+                "[Avelia] 旧予定Tool履歴を削除: "
+                f"{_schedule_history_cleanup['removed']}件",
+                flush=True,
+            )
+
+    except Exception as e:
+        print(
+            "[Avelia] 旧予定Tool履歴の削除に失敗: "
+            f"{type(e).__name__}: {e}",
+            flush=True,
+        )
+
+
     # =========================================================
     # MySQL設定チェック
     # =========================================================
@@ -2404,6 +3226,11 @@ if _AVELIA_MODE == "daemon":
             f"ユーザーの名前を呼ぶときは、必ず「{real_name}さん」と呼んでください。"
             f"最終ログイン日時は{last_login}です。"
             f"学習機能は{('有効' if learning_enabled_keyword else '無効')} です。"
+            "現在の予定・スケジュール・Google Calendarの内容を尋ねられた場合、"
+            "記憶・過去会話・過去のTool結果だけで回答せず、"
+            "必ずGoogle Calendar取得Toolを実行して最新情報を確認してください。"
+            "Google Calendar Toolが返していない予定を、現在存在する予定として"
+            "補完・推測・復元してはいけません。"
             f"{execution_context}"
             f"現在時刻は{current_date}です。"
             f"{session_msg}"
@@ -3873,14 +4700,14 @@ if _AVELIA_MODE == "daemon":
             {
                 "type": "function",
                 "name": "get_schedules",
-                "description": "登録されているスケジュール予定を一覧表示するために取得します。",
+                "description": "Google Calendarから今後のスケジュール予定を取得します。旧互換Toolです。",
                 "strict": True,
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "include_used": {
                             "type": "boolean",
-                            "description": "trueなら通知済み予定も含める"
+                            "description": "旧互換引数。trueならAvelia完了済み予定も含める"
                         }
                     },
                     "required": ["include_used"],
@@ -3890,14 +4717,14 @@ if _AVELIA_MODE == "daemon":
             {
                 "type": "function",
                 "name": "delete_schedule",
-                "description": "指定IDのスケジュールを削除します。",
+                "description": "指定したGoogle CalendarイベントIDのスケジュールを削除します。",
                 "strict": True,
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "schedule_id": {
-                            "type": "integer",
-                            "description": "削除するスケジュールID"
+                            "type": "string",
+                            "description": "削除するGoogle CalendarイベントID"
                         }
                     },
                     "required": ["schedule_id"],
@@ -4063,7 +4890,7 @@ if _AVELIA_MODE == "daemon":
             "calendar_complete_once",
 
         "description":
-            "単発予定を完了済みにします。",
+            "Google Calendar上の単発予定を完了済みにします。",
 
         "strict": True,
 
@@ -4074,7 +4901,8 @@ if _AVELIA_MODE == "daemon":
             "properties": {
 
                 "schedule_id": {
-                    "type": "integer"
+                    "type": "string",
+                    "description": "Google CalendarイベントID"
                 }
             },
 
@@ -4092,7 +4920,7 @@ if _AVELIA_MODE == "daemon":
             "calendar_complete_weekly",
 
         "description": (
-            "曜日条件付き定期予定の"
+            "Google Calendar上の曜日条件付き定期予定の"
             "その日分だけを完了済みにします。"
         ),
 
@@ -4105,7 +4933,8 @@ if _AVELIA_MODE == "daemon":
             "properties": {
 
                 "schedule_id": {
-                    "type": "integer"
+                    "type": "string",
+                    "description": "Google CalendarイベントID"
                 },
 
                 "scheduled_date": {
@@ -4178,9 +5007,9 @@ if _AVELIA_MODE == "daemon":
             "properties": {
 
                 "schedule_id": {
-                    "type": "integer",
+                    "type": "string",
                     "description":
-                        "削除する単発予定ID"
+                        "削除する単発予定のGoogle CalendarイベントID"
                 }
             },
 
@@ -4213,9 +5042,9 @@ if _AVELIA_MODE == "daemon":
             "properties": {
 
                 "schedule_id": {
-                    "type": "integer",
+                    "type": "string",
                     "description":
-                        "削除する定期予定ID"
+                        "削除する定期予定のGoogle CalendarイベントID"
                 }
             },
 
