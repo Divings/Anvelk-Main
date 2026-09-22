@@ -40,7 +40,7 @@ DEFAULT_PORT = int(os.getenv("AVELIA_DAEMON_PORT", "47500"))
 
 GOOGLE_CALENDAR_SCOPES = ["https://www.googleapis.com/auth/calendar"]
 GOOGLE_CALENDAR_TIMEZONE = "Asia/Tokyo"
-GOOGLE_CALENDAR_AUTH_PORT = int(os.getenv("AVELIA_GOOGLE_AUTH_PORT", "8765"))
+GOOGLE_CALENDAR_AUTH_PORT = 8765
 
 
 def _google_calendar_data_dir():
@@ -50,12 +50,18 @@ def _google_calendar_data_dir():
 
 
 def _run_google_calendar_auth():
-    """Google Calendarの初回OAuth認証だけを対話的に実行する。"""
+    """
+    Avelia本体内部でGoogle Calendar OAuth認証を完結させる。
+
+    認証用の外部Pythonスクリプトは不要。
+    GUIがある場合はブラウザを開き、GUIがない場合は認証URLを
+    現在のAveliaセッションへ表示する。
+    """
     try:
         from google_auth_oauthlib.flow import InstalledAppFlow
     except ImportError as e:
-        raise SystemExit(
-            "Google Calendar依存ライブラリがありません。\n"
+        raise RuntimeError(
+            "Google Calendar依存ライブラリがありません。 "
             "python3 -m pip install google-api-python-client "
             "google-auth-httplib2 google-auth-oauthlib"
         ) from e
@@ -65,8 +71,8 @@ def _run_google_calendar_auth():
     token_file = data_dir / "google_calendar_token.json"
 
     if not credentials_file.is_file():
-        raise SystemExit(
-            "Google OAuthクライアントJSONがありません。\n"
+        raise RuntimeError(
+            "Google OAuthクライアントJSONがありません。 "
             f"配置先: {credentials_file}"
         )
 
@@ -75,26 +81,36 @@ def _run_google_calendar_auth():
         GOOGLE_CALENDAR_SCOPES,
     )
 
-    has_gui = bool(os.getenv("DISPLAY") or os.getenv("WAYLAND_DISPLAY"))
+    # DISPLAYなどの環境変数には依存しない。
+    # Avelia自身は常駐サーバーとして動くため、自動ブラウザ起動は行わず、
+    # 認証URLを必ず現在のセッションへ表示する。
     print("")
     print(" Google Calendar OAuth認証を開始します。")
-    if not has_gui:
-        print(
-            " GUIのないSSH環境では、別端末から次のようなポートフォワードを張ってから\n"
-            f" 認証してください: ssh -L {GOOGLE_CALENDAR_AUTH_PORT}:127.0.0.1:{GOOGLE_CALENDAR_AUTH_PORT} <server>"
-        )
+    print(
+        " Aveliaサーバーが別PCの場合は、必要に応じて次のSSHポートフォワードを使用してください。"
+    )
+    print(
+        f" ssh -L {GOOGLE_CALENDAR_AUTH_PORT}:127.0.0.1:{GOOGLE_CALENDAR_AUTH_PORT} <server>"
+    )
+    print("")
 
     creds = flow.run_local_server(
         host="127.0.0.1",
         port=GOOGLE_CALENDAR_AUTH_PORT,
-        open_browser=has_gui,
+        open_browser=False,
         authorization_prompt_message=(
             " 次のURLをブラウザで開いてGoogle認証してください:\n{url}\n"
         ),
-        success_message="AveliaのGoogle Calendar認証が完了しました。このタブは閉じて構いません。",
+        success_message=(
+            "AveliaのGoogle Calendar認証が完了しました。"
+            "このタブは閉じて構いません。"
+        ),
     )
 
-    token_file.write_text(creds.to_json(), encoding="utf-8")
+    token_file.write_text(
+        creds.to_json(),
+        encoding="utf-8",
+    )
     try:
         token_file.chmod(0o600)
     except OSError:
@@ -102,7 +118,12 @@ def _run_google_calendar_auth():
 
     print("")
     print(" Google Calendar認証が完了しました。")
-    print(f" token: {token_file}")
+
+    return {
+        "success": True,
+        "authenticated": True,
+        "token_file": str(token_file),
+    }
 
 
 def _configure_stdio():
@@ -2706,9 +2727,77 @@ if _AVELIA_MODE == "daemon":
         return result_items
 
 
+    def google_calendar_auth_status():
+        """Google Calendarの認証状態を返す。"""
+        if not GOOGLE_CALENDAR_TOKEN_FILE.is_file():
+            return {
+                "success": True,
+                "authenticated": False,
+                "reason": "token_not_found",
+            }
+
+        try:
+            _get_google_calendar_service()
+            return {
+                "success": True,
+                "authenticated": True,
+            }
+        except Exception as e:
+            return {
+                "success": True,
+                "authenticated": False,
+                "reason": str(e),
+            }
+
+
+    def google_calendar_authenticate():
+        """現在のAveliaセッション内でGoogle OAuth認証を実行する。"""
+        global _google_calendar_service_cache
+
+        result = _run_google_calendar_auth()
+
+        # 認証前のserviceを保持していた場合に備えて破棄する。
+        _google_calendar_service_cache = None
+
+        # 保存直後にAPI clientを構築してtokenの利用可否まで確認する。
+        _get_google_calendar_service()
+
+        return result
+
+
     def _google_calendar_tool_schemas():
         nullable_string = {"type": ["string", "null"]}
         return [
+            {
+                "type": "function",
+                "name": "google_calendar_auth_status",
+                "description": (
+                    "Google CalendarのOAuth認証状態を確認する。"
+                    "認証操作は行わない。"
+                ),
+                "strict": True,
+                "parameters": {
+                    "type": "object",
+                    "properties": {},
+                    "required": [],
+                    "additionalProperties": False,
+                },
+            },
+            {
+                "type": "function",
+                "name": "google_calendar_authenticate",
+                "description": (
+                    "ユーザーがGoogle Calendarの接続、認証、再認証を明示的に依頼した場合のみ使用する。"
+                    "Avelia本体内部でOAuth認証URLを表示し、認証完了後にtokenを保存する。"
+                ),
+                "strict": True,
+                "parameters": {
+                    "type": "object",
+                    "properties": {},
+                    "required": [],
+                    "additionalProperties": False,
+                },
+            },
             {
                 "type": "function",
                 "name": "google_calendar_get_date",
@@ -2831,6 +2920,12 @@ if _AVELIA_MODE == "daemon":
 
 
     def _execute_google_calendar_tool(tool_name, arguments):
+        if tool_name == "google_calendar_auth_status":
+            return google_calendar_auth_status()
+
+        if tool_name == "google_calendar_authenticate":
+            return google_calendar_authenticate()
+
         calendar_id = arguments.get("calendar_id") or "primary"
 
         if tool_name == "google_calendar_get_date":
