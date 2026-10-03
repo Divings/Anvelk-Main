@@ -608,6 +608,12 @@ if _AVELIA_MODE != "connect":
         init_knowledge_table,
         get_knowledge_context
     )
+    from pack.emotion import (
+        load_emotion_state,
+        save_emotion_state,
+        update_emotion_state,
+        get_emotion_prompt,
+    )
     from pack.Auth import authorize_environment
     from rich.console import Console
     from rich.markdown import Markdown
@@ -725,6 +731,361 @@ if _AVELIA_MODE != "connect":
         db_config = load_database_config()
 
         return mysql.connector.connect(**db_config)
+
+    # =========================================================
+    # AIファイル振り分け / ファイル台帳
+    # =========================================================
+
+    FILE_STORAGE_ROOT = Path("/mnt/Folders")
+
+    # AIが選べる分類先を固定し、任意パス生成を防ぐ。
+    FILE_CATEGORY_DIRS = {
+        "documents": "documents",
+        "images": "images",
+        "spreadsheets": "spreadsheets",
+        "presentations": "presentations",
+        "archives": "archives",
+        "source_code": "source_code",
+        "audio": "audio",
+        "video": "video",
+        "database": "database",
+        "certificates": "certificates",
+        "installers": "installers",
+        "fonts": "fonts",
+        "other": "other",
+    }
+
+
+    def init_file_registry_table():
+        """AI振り分け済みファイルの所在を記録するテーブルを作成する。"""
+        conn = get_db_connection()
+        cursor = conn.cursor()
+
+        try:
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS file_registry (
+                    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+                    original_file_name VARCHAR(255) NOT NULL,
+                    stored_file_name VARCHAR(255) NOT NULL,
+                    stored_path TEXT NOT NULL,
+                    category VARCHAR(64) NOT NULL,
+                    extension VARCHAR(64) NULL,
+                    mime_type VARCHAR(255) NULL,
+                    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+                        ON UPDATE CURRENT_TIMESTAMP,
+                    PRIMARY KEY (id),
+                    INDEX idx_file_registry_original_name (original_file_name),
+                    INDEX idx_file_registry_stored_name (stored_file_name),
+                    INDEX idx_file_registry_category (category)
+                ) ENGINE=InnoDB
+                  DEFAULT CHARSET=utf8mb4
+                  COLLATE=utf8mb4_unicode_ci
+                """
+            )
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            cursor.close()
+            conn.close()
+
+
+    def _detect_file_mime(file_path):
+        """実ファイルのMIMEを優先して取得し、失敗時は拡張子推測へフォールバック。"""
+        import mimetypes
+
+        target = Path(file_path)
+
+        try:
+            result = subprocess.run(
+                ["file", "--brief", "--mime-type", "--", str(target)],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                stdin=subprocess.DEVNULL,
+            )
+            mime_type = (result.stdout or "").strip()
+            if result.returncode == 0 and mime_type:
+                return mime_type
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+
+        guessed, _encoding = mimetypes.guess_type(str(target))
+        return guessed or "application/octet-stream"
+
+
+    def _classify_file_metadata_with_ai(file_name, extension, mime_type):
+        """
+        ファイル本文を送らず、ファイル名・拡張子・MIMEだけで分類する。
+        戻り値はFILE_CATEGORY_DIRSのキーのいずれか。
+        """
+        api_key = load_openai_api_key()
+        if not api_key:
+            raise RuntimeError("OpenAI APIキーが設定されていません。")
+
+        categories = ", ".join(FILE_CATEGORY_DIRS.keys())
+        prompt = (
+            "あなたはファイル分類器です。ファイル本文は参照できません。"
+            "次の3情報だけを使って分類してください。\n"
+            f"ファイル名: {file_name}\n"
+            f"拡張子: {extension or '(なし)'}\n"
+            f"MIMEタイプ: {mime_type}\n\n"
+            f"分類候補: {categories}\n"
+            "最も適切な分類候補を1つだけ、英小文字のキーだけで返してください。"
+            "説明、記号、Markdownは付けないでください。"
+        )
+
+        response = _post_openai(
+            "https://api.openai.com/v1/responses",
+            _openai_headers(api_key),
+            {
+                "model": load_model(),
+                "input": prompt,
+                "max_output_tokens": 32,
+            },
+        )
+
+        if response is None:
+            raise RuntimeError("OpenAI APIに接続できませんでした。")
+        if response.status_code != 200:
+            _handle_openai_http_error(response)
+            raise RuntimeError(f"OpenAI API Error: {response.status_code}")
+
+        result = response.json()
+        category = (_extract_responses_text(result) or "").strip().lower()
+        category = category.strip("`'\" \t\r\n.,:;[]{}()")
+
+        # 余計な説明が返った場合でも、候補名が含まれていれば1つだけ拾う。
+        if category not in FILE_CATEGORY_DIRS:
+            hits = [name for name in FILE_CATEGORY_DIRS if name in category]
+            category = hits[0] if len(hits) == 1 else "other"
+
+        return category
+
+
+    def _unique_destination_path(destination_dir, file_name):
+        """同名ファイルを上書きせず、_1, _2 ... を付けた保存先を返す。"""
+        destination = destination_dir / file_name
+        if not destination.exists():
+            return destination
+
+        source_name = Path(file_name)
+        counter = 1
+        while True:
+            candidate = destination_dir / (
+                f"{source_name.stem}_{counter}{source_name.suffix}"
+            )
+            if not candidate.exists():
+                return candidate
+            counter += 1
+
+
+    def register_sorted_file(
+        original_file_name,
+        stored_file_name,
+        stored_path,
+        category,
+        extension,
+        mime_type,
+    ):
+        """振り分けに成功したファイルをDBへ登録し、登録IDを返す。"""
+        conn = get_db_connection()
+        cursor = conn.cursor()
+
+        try:
+            cursor.execute(
+                """
+                INSERT INTO file_registry
+                    (
+                        original_file_name,
+                        stored_file_name,
+                        stored_path,
+                        category,
+                        extension,
+                        mime_type
+                    )
+                VALUES (%s, %s, %s, %s, %s, %s)
+                """,
+                (
+                    str(original_file_name),
+                    str(stored_file_name),
+                    str(stored_path),
+                    str(category),
+                    str(extension or ""),
+                    str(mime_type or ""),
+                ),
+            )
+            registry_id = cursor.lastrowid
+            conn.commit()
+            return registry_id
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            cursor.close()
+            conn.close()
+
+
+    def organize_file_with_ai(file_path):
+        """
+        メタデータのみをAIへ渡して分類し、/mnt/Folders配下へ移動してDB登録する。
+        """
+        source = Path(str(file_path)).expanduser()
+
+        if not source.is_absolute():
+            source = source.resolve()
+
+        if not source.exists():
+            return {"success": False, "error": "file_not_found", "path": str(source)}
+        if source.is_symlink() or not source.is_file():
+            return {"success": False, "error": "regular_file_required", "path": str(source)}
+
+        original_file_name = source.name
+        extension = source.suffix.lower()
+        mime_type = _detect_file_mime(source)
+
+        category = _classify_file_metadata_with_ai(
+            original_file_name,
+            extension,
+            mime_type,
+        )
+
+        if category not in FILE_CATEGORY_DIRS:
+            category = "other"
+
+        FILE_STORAGE_ROOT.mkdir(parents=True, exist_ok=True)
+        destination_dir = FILE_STORAGE_ROOT / FILE_CATEGORY_DIRS[category]
+        destination_dir.mkdir(parents=True, exist_ok=True)
+
+        destination = _unique_destination_path(destination_dir, original_file_name)
+
+        try:
+            shutil.move(str(source), str(destination))
+        except Exception as e:
+            return {
+                "success": False,
+                "error": "move_failed",
+                "message": str(e),
+                "source_path": str(source),
+                "destination_path": str(destination),
+            }
+
+        if not destination.is_file():
+            return {
+                "success": False,
+                "error": "move_verification_failed",
+                "destination_path": str(destination),
+            }
+
+        # 移動成功後にDB登録する。DB登録に失敗した場合は可能な限り元へ戻す。
+        try:
+            registry_id = register_sorted_file(
+                original_file_name=original_file_name,
+                stored_file_name=destination.name,
+                stored_path=str(destination),
+                category=category,
+                extension=extension,
+                mime_type=mime_type,
+            )
+        except Exception as e:
+            rollback_error = None
+            try:
+                source.parent.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(destination), str(source))
+            except Exception as rollback_exc:
+                rollback_error = str(rollback_exc)
+
+            return {
+                "success": False,
+                "error": "database_register_failed",
+                "message": str(e),
+                "rollback_error": rollback_error,
+                "original_path": str(source),
+                "temporary_destination": str(destination),
+            }
+
+        return {
+            "success": True,
+            "registry_id": registry_id,
+            "original_file_name": original_file_name,
+            "stored_file_name": destination.name,
+            "stored_path": str(destination),
+            "folder": str(destination_dir),
+            "category": category,
+            "extension": extension,
+            "mime_type": mime_type,
+            "classification_basis": ["file_name", "extension", "mime_type"],
+        }
+
+
+    def find_registered_files(keyword, limit=20):
+        """ファイル名・格納先・カテゴリから所在を検索する。"""
+        keyword = str(keyword or "").strip()
+        if not keyword:
+            raise ValueError("検索キーワードが空です。")
+
+        try:
+            limit = int(limit)
+        except (TypeError, ValueError):
+            limit = 20
+        limit = max(1, min(limit, 50))
+
+        like = f"%{keyword}%"
+        conn = get_db_connection()
+        cursor = conn.cursor(dictionary=True)
+
+        try:
+            cursor.execute(
+                f"""
+                SELECT
+                    id,
+                    original_file_name,
+                    stored_file_name,
+                    stored_path,
+                    category,
+                    extension,
+                    mime_type,
+                    created_at,
+                    updated_at
+                FROM file_registry
+                WHERE
+                    original_file_name LIKE %s
+                    OR stored_file_name LIKE %s
+                    OR stored_path LIKE %s
+                    OR category LIKE %s
+                ORDER BY updated_at DESC, id DESC
+                LIMIT {limit}
+                """,
+                (like, like, like, like),
+            )
+            rows = cursor.fetchall()
+        finally:
+            cursor.close()
+            conn.close()
+
+        for row in rows:
+            for key in ("created_at", "updated_at"):
+                value = row.get(key)
+                if value is not None and hasattr(value, "strftime"):
+                    row[key] = value.strftime("%Y-%m-%d %H:%M:%S")
+
+        return {
+            "success": True,
+            "keyword": keyword,
+            "count": len(rows),
+            "files": rows,
+        }
+
+
+    try:
+        init_file_registry_table()
+    except Exception as e:
+        print("")
+        print(" File Registry Databaseを初期化できませんでした。")
+        print(f" {e}")
 
     card_id = ""
     real_name = ""
@@ -2726,6 +3087,15 @@ if _AVELIA_MODE != "connect":
             base_prompt = "あなたは自然な日本語を話すAIアシスタントです。"
         current_date=datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         execution_context = get_execution_history_context(limit=5)
+
+        try:
+            emotion_context = get_emotion_prompt(
+                load_emotion_state(DATA_DIR)
+            )
+        except Exception:
+            # 感情パッチ側の障害で会話本体を止めない。
+            emotion_context = ""
+
         if sys_msg!="":
             session_msg=sys_msg
             sys_msg=""
@@ -2746,6 +3116,7 @@ if _AVELIA_MODE != "connect":
             f"最終ログイン日時は{last_login}です。"
             f"学習機能は{('有効' if learning_enabled_keyword else '無効')} です。"
             f"{execution_context}"
+            f"{emotion_context}"
             f"現在時刻は{current_date}です。"
             f"{session_msg}"
         )
@@ -3941,6 +4312,56 @@ if _AVELIA_MODE != "connect":
             "additionalProperties": False
         }
     },
+    {
+        "type": "function",
+        "name": "organize_file_with_ai",
+        "description": (
+            "ファイル本文を読まず、ファイル名・拡張子・MIMEタイプだけをAIで判定し、"
+            "/mnt/Folders 配下の分類フォルダへ移動します。"
+            "分類先フォルダが無ければ自動作成し、移動成功後にファイル名・保存先・"
+            "カテゴリ・拡張子・MIMEタイプをfile_registryへ登録します。"
+            "ユーザーがファイルの整理、振り分け、格納を明示的に依頼した場合に使用してください。"
+        ),
+        "strict": True,
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "file_path": {
+                    "type": "string",
+                    "description": "振り分けるローカルファイルのパス"
+                }
+            },
+            "required": ["file_path"],
+            "additionalProperties": False
+        }
+    },
+    {
+        "type": "function",
+        "name": "find_registered_files",
+        "description": (
+            "file_registryを検索し、振り分け済みファイルの保存場所を調べます。"
+            "『〇〇のファイルはどこ？』『〇〇をどこに保存した？』など、"
+            "ファイルの所在を尋ねられた場合に使用してください。"
+        ),
+        "strict": True,
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "keyword": {
+                    "type": "string",
+                    "description": "探すファイル名、カテゴリ、フォルダ名などの検索語"
+                },
+                "limit": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 50,
+                    "description": "最大検索件数。通常は20"
+                }
+            },
+            "required": ["keyword", "limit"],
+            "additionalProperties": False
+        }
+    },
             {
         "type": "function",
         "name": "read_pdf",
@@ -4858,6 +5279,16 @@ if _AVELIA_MODE != "connect":
                 file_path=arguments["file_path"],
                 importance=arguments["importance"]
             )
+        if tool_name == "organize_file_with_ai":
+            return organize_file_with_ai(
+                file_path=arguments["file_path"]
+            )
+
+        if tool_name == "find_registered_files":
+            return find_registered_files(
+                keyword=arguments["keyword"],
+                limit=arguments.get("limit", 20),
+            )
         if tool_name == "ocr_image":
 
             return ocr_image(
@@ -5661,6 +6092,23 @@ if _AVELIA_MODE != "connect":
                     messages.pop()
 
                 continue
+
+
+            # -------------------------------------------------
+            # 感情シミュレーション更新
+            # -------------------------------------------------
+
+            try:
+                emotion_state = load_emotion_state(DATA_DIR)
+                emotion_state = update_emotion_state(
+                    emotion_state,
+                    user_input,
+                    response,
+                )
+                save_emotion_state(DATA_DIR, emotion_state)
+            except Exception:
+                # 感情状態の更新失敗だけで会話本体を止めない。
+                pass
 
 
             # -------------------------------------------------

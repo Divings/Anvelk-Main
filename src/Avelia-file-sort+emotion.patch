@@ -1,0 +1,743 @@
+--- a/Avelia.py
++++ b/Avelia.py
+@@ -608,6 +608,12 @@
+         init_knowledge_table,
+         get_knowledge_context
+     )
++    from pack.emotion import (
++        load_emotion_state,
++        save_emotion_state,
++        update_emotion_state,
++        get_emotion_prompt,
++    )
+     from pack.Auth import authorize_environment
+     from rich.console import Console
+     from rich.markdown import Markdown
+@@ -726,6 +732,361 @@
+ 
+         return mysql.connector.connect(**db_config)
+ 
++    # =========================================================
++    # AIファイル振り分け / ファイル台帳
++    # =========================================================
++
++    FILE_STORAGE_ROOT = Path("/mnt/Folders")
++
++    # AIが選べる分類先を固定し、任意パス生成を防ぐ。
++    FILE_CATEGORY_DIRS = {
++        "documents": "documents",
++        "images": "images",
++        "spreadsheets": "spreadsheets",
++        "presentations": "presentations",
++        "archives": "archives",
++        "source_code": "source_code",
++        "audio": "audio",
++        "video": "video",
++        "database": "database",
++        "certificates": "certificates",
++        "installers": "installers",
++        "fonts": "fonts",
++        "other": "other",
++    }
++
++
++    def init_file_registry_table():
++        """AI振り分け済みファイルの所在を記録するテーブルを作成する。"""
++        conn = get_db_connection()
++        cursor = conn.cursor()
++
++        try:
++            cursor.execute(
++                """
++                CREATE TABLE IF NOT EXISTS file_registry (
++                    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
++                    original_file_name VARCHAR(255) NOT NULL,
++                    stored_file_name VARCHAR(255) NOT NULL,
++                    stored_path TEXT NOT NULL,
++                    category VARCHAR(64) NOT NULL,
++                    extension VARCHAR(64) NULL,
++                    mime_type VARCHAR(255) NULL,
++                    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
++                    updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
++                        ON UPDATE CURRENT_TIMESTAMP,
++                    PRIMARY KEY (id),
++                    INDEX idx_file_registry_original_name (original_file_name),
++                    INDEX idx_file_registry_stored_name (stored_file_name),
++                    INDEX idx_file_registry_category (category)
++                ) ENGINE=InnoDB
++                  DEFAULT CHARSET=utf8mb4
++                  COLLATE=utf8mb4_unicode_ci
++                """
++            )
++            conn.commit()
++        except Exception:
++            conn.rollback()
++            raise
++        finally:
++            cursor.close()
++            conn.close()
++
++
++    def _detect_file_mime(file_path):
++        """実ファイルのMIMEを優先して取得し、失敗時は拡張子推測へフォールバック。"""
++        import mimetypes
++
++        target = Path(file_path)
++
++        try:
++            result = subprocess.run(
++                ["file", "--brief", "--mime-type", "--", str(target)],
++                capture_output=True,
++                text=True,
++                timeout=10,
++                stdin=subprocess.DEVNULL,
++            )
++            mime_type = (result.stdout or "").strip()
++            if result.returncode == 0 and mime_type:
++                return mime_type
++        except (OSError, subprocess.TimeoutExpired):
++            pass
++
++        guessed, _encoding = mimetypes.guess_type(str(target))
++        return guessed or "application/octet-stream"
++
++
++    def _classify_file_metadata_with_ai(file_name, extension, mime_type):
++        """
++        ファイル本文を送らず、ファイル名・拡張子・MIMEだけで分類する。
++        戻り値はFILE_CATEGORY_DIRSのキーのいずれか。
++        """
++        api_key = load_openai_api_key()
++        if not api_key:
++            raise RuntimeError("OpenAI APIキーが設定されていません。")
++
++        categories = ", ".join(FILE_CATEGORY_DIRS.keys())
++        prompt = (
++            "あなたはファイル分類器です。ファイル本文は参照できません。"
++            "次の3情報だけを使って分類してください。\n"
++            f"ファイル名: {file_name}\n"
++            f"拡張子: {extension or '(なし)'}\n"
++            f"MIMEタイプ: {mime_type}\n\n"
++            f"分類候補: {categories}\n"
++            "最も適切な分類候補を1つだけ、英小文字のキーだけで返してください。"
++            "説明、記号、Markdownは付けないでください。"
++        )
++
++        response = _post_openai(
++            "https://api.openai.com/v1/responses",
++            _openai_headers(api_key),
++            {
++                "model": load_model(),
++                "input": prompt,
++                "max_output_tokens": 32,
++            },
++        )
++
++        if response is None:
++            raise RuntimeError("OpenAI APIに接続できませんでした。")
++        if response.status_code != 200:
++            _handle_openai_http_error(response)
++            raise RuntimeError(f"OpenAI API Error: {response.status_code}")
++
++        result = response.json()
++        category = (_extract_responses_text(result) or "").strip().lower()
++        category = category.strip("`'\" \t\r\n.,:;[]{}()")
++
++        # 余計な説明が返った場合でも、候補名が含まれていれば1つだけ拾う。
++        if category not in FILE_CATEGORY_DIRS:
++            hits = [name for name in FILE_CATEGORY_DIRS if name in category]
++            category = hits[0] if len(hits) == 1 else "other"
++
++        return category
++
++
++    def _unique_destination_path(destination_dir, file_name):
++        """同名ファイルを上書きせず、_1, _2 ... を付けた保存先を返す。"""
++        destination = destination_dir / file_name
++        if not destination.exists():
++            return destination
++
++        source_name = Path(file_name)
++        counter = 1
++        while True:
++            candidate = destination_dir / (
++                f"{source_name.stem}_{counter}{source_name.suffix}"
++            )
++            if not candidate.exists():
++                return candidate
++            counter += 1
++
++
++    def register_sorted_file(
++        original_file_name,
++        stored_file_name,
++        stored_path,
++        category,
++        extension,
++        mime_type,
++    ):
++        """振り分けに成功したファイルをDBへ登録し、登録IDを返す。"""
++        conn = get_db_connection()
++        cursor = conn.cursor()
++
++        try:
++            cursor.execute(
++                """
++                INSERT INTO file_registry
++                    (
++                        original_file_name,
++                        stored_file_name,
++                        stored_path,
++                        category,
++                        extension,
++                        mime_type
++                    )
++                VALUES (%s, %s, %s, %s, %s, %s)
++                """,
++                (
++                    str(original_file_name),
++                    str(stored_file_name),
++                    str(stored_path),
++                    str(category),
++                    str(extension or ""),
++                    str(mime_type or ""),
++                ),
++            )
++            registry_id = cursor.lastrowid
++            conn.commit()
++            return registry_id
++        except Exception:
++            conn.rollback()
++            raise
++        finally:
++            cursor.close()
++            conn.close()
++
++
++    def organize_file_with_ai(file_path):
++        """
++        メタデータのみをAIへ渡して分類し、/mnt/Folders配下へ移動してDB登録する。
++        """
++        source = Path(str(file_path)).expanduser()
++
++        if not source.is_absolute():
++            source = source.resolve()
++
++        if not source.exists():
++            return {"success": False, "error": "file_not_found", "path": str(source)}
++        if source.is_symlink() or not source.is_file():
++            return {"success": False, "error": "regular_file_required", "path": str(source)}
++
++        original_file_name = source.name
++        extension = source.suffix.lower()
++        mime_type = _detect_file_mime(source)
++
++        category = _classify_file_metadata_with_ai(
++            original_file_name,
++            extension,
++            mime_type,
++        )
++
++        if category not in FILE_CATEGORY_DIRS:
++            category = "other"
++
++        FILE_STORAGE_ROOT.mkdir(parents=True, exist_ok=True)
++        destination_dir = FILE_STORAGE_ROOT / FILE_CATEGORY_DIRS[category]
++        destination_dir.mkdir(parents=True, exist_ok=True)
++
++        destination = _unique_destination_path(destination_dir, original_file_name)
++
++        try:
++            shutil.move(str(source), str(destination))
++        except Exception as e:
++            return {
++                "success": False,
++                "error": "move_failed",
++                "message": str(e),
++                "source_path": str(source),
++                "destination_path": str(destination),
++            }
++
++        if not destination.is_file():
++            return {
++                "success": False,
++                "error": "move_verification_failed",
++                "destination_path": str(destination),
++            }
++
++        # 移動成功後にDB登録する。DB登録に失敗した場合は可能な限り元へ戻す。
++        try:
++            registry_id = register_sorted_file(
++                original_file_name=original_file_name,
++                stored_file_name=destination.name,
++                stored_path=str(destination),
++                category=category,
++                extension=extension,
++                mime_type=mime_type,
++            )
++        except Exception as e:
++            rollback_error = None
++            try:
++                source.parent.mkdir(parents=True, exist_ok=True)
++                shutil.move(str(destination), str(source))
++            except Exception as rollback_exc:
++                rollback_error = str(rollback_exc)
++
++            return {
++                "success": False,
++                "error": "database_register_failed",
++                "message": str(e),
++                "rollback_error": rollback_error,
++                "original_path": str(source),
++                "temporary_destination": str(destination),
++            }
++
++        return {
++            "success": True,
++            "registry_id": registry_id,
++            "original_file_name": original_file_name,
++            "stored_file_name": destination.name,
++            "stored_path": str(destination),
++            "folder": str(destination_dir),
++            "category": category,
++            "extension": extension,
++            "mime_type": mime_type,
++            "classification_basis": ["file_name", "extension", "mime_type"],
++        }
++
++
++    def find_registered_files(keyword, limit=20):
++        """ファイル名・格納先・カテゴリから所在を検索する。"""
++        keyword = str(keyword or "").strip()
++        if not keyword:
++            raise ValueError("検索キーワードが空です。")
++
++        try:
++            limit = int(limit)
++        except (TypeError, ValueError):
++            limit = 20
++        limit = max(1, min(limit, 50))
++
++        like = f"%{keyword}%"
++        conn = get_db_connection()
++        cursor = conn.cursor(dictionary=True)
++
++        try:
++            cursor.execute(
++                f"""
++                SELECT
++                    id,
++                    original_file_name,
++                    stored_file_name,
++                    stored_path,
++                    category,
++                    extension,
++                    mime_type,
++                    created_at,
++                    updated_at
++                FROM file_registry
++                WHERE
++                    original_file_name LIKE %s
++                    OR stored_file_name LIKE %s
++                    OR stored_path LIKE %s
++                    OR category LIKE %s
++                ORDER BY updated_at DESC, id DESC
++                LIMIT {limit}
++                """,
++                (like, like, like, like),
++            )
++            rows = cursor.fetchall()
++        finally:
++            cursor.close()
++            conn.close()
++
++        for row in rows:
++            for key in ("created_at", "updated_at"):
++                value = row.get(key)
++                if value is not None and hasattr(value, "strftime"):
++                    row[key] = value.strftime("%Y-%m-%d %H:%M:%S")
++
++        return {
++            "success": True,
++            "keyword": keyword,
++            "count": len(rows),
++            "files": rows,
++        }
++
++
++    try:
++        init_file_registry_table()
++    except Exception as e:
++        print("")
++        print(" File Registry Databaseを初期化できませんでした。")
++        print(f" {e}")
++
+     card_id = ""
+     real_name = ""
+     last_login = ""
+@@ -2726,6 +3087,15 @@
+             base_prompt = "あなたは自然な日本語を話すAIアシスタントです。"
+         current_date=datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+         execution_context = get_execution_history_context(limit=5)
++
++        try:
++            emotion_context = get_emotion_prompt(
++                load_emotion_state(DATA_DIR)
++            )
++        except Exception:
++            # 感情パッチ側の障害で会話本体を止めない。
++            emotion_context = ""
++
+         if sys_msg!="":
+             session_msg=sys_msg
+             sys_msg=""
+@@ -2746,6 +3116,7 @@
+             f"最終ログイン日時は{last_login}です。"
+             f"学習機能は{('有効' if learning_enabled_keyword else '無効')} です。"
+             f"{execution_context}"
++            f"{emotion_context}"
+             f"現在時刻は{current_date}です。"
+             f"{session_msg}"
+         )
+@@ -3941,6 +4312,56 @@
+             "additionalProperties": False
+         }
+     },
++    {
++        "type": "function",
++        "name": "organize_file_with_ai",
++        "description": (
++            "ファイル本文を読まず、ファイル名・拡張子・MIMEタイプだけをAIで判定し、"
++            "/mnt/Folders 配下の分類フォルダへ移動します。"
++            "分類先フォルダが無ければ自動作成し、移動成功後にファイル名・保存先・"
++            "カテゴリ・拡張子・MIMEタイプをfile_registryへ登録します。"
++            "ユーザーがファイルの整理、振り分け、格納を明示的に依頼した場合に使用してください。"
++        ),
++        "strict": True,
++        "parameters": {
++            "type": "object",
++            "properties": {
++                "file_path": {
++                    "type": "string",
++                    "description": "振り分けるローカルファイルのパス"
++                }
++            },
++            "required": ["file_path"],
++            "additionalProperties": False
++        }
++    },
++    {
++        "type": "function",
++        "name": "find_registered_files",
++        "description": (
++            "file_registryを検索し、振り分け済みファイルの保存場所を調べます。"
++            "『〇〇のファイルはどこ？』『〇〇をどこに保存した？』など、"
++            "ファイルの所在を尋ねられた場合に使用してください。"
++        ),
++        "strict": True,
++        "parameters": {
++            "type": "object",
++            "properties": {
++                "keyword": {
++                    "type": "string",
++                    "description": "探すファイル名、カテゴリ、フォルダ名などの検索語"
++                },
++                "limit": {
++                    "type": "integer",
++                    "minimum": 1,
++                    "maximum": 50,
++                    "description": "最大検索件数。通常は20"
++                }
++            },
++            "required": ["keyword", "limit"],
++            "additionalProperties": False
++        }
++    },
+             {
+         "type": "function",
+         "name": "read_pdf",
+@@ -4858,6 +5279,16 @@
+                 file_path=arguments["file_path"],
+                 importance=arguments["importance"]
+             )
++        if tool_name == "organize_file_with_ai":
++            return organize_file_with_ai(
++                file_path=arguments["file_path"]
++            )
++
++        if tool_name == "find_registered_files":
++            return find_registered_files(
++                keyword=arguments["keyword"],
++                limit=arguments.get("limit", 20),
++            )
+         if tool_name == "ocr_image":
+ 
+             return ocr_image(
+@@ -5664,6 +6095,23 @@
+ 
+ 
+             # -------------------------------------------------
++            # 感情シミュレーション更新
++            # -------------------------------------------------
++
++            try:
++                emotion_state = load_emotion_state(DATA_DIR)
++                emotion_state = update_emotion_state(
++                    emotion_state,
++                    user_input,
++                    response,
++                )
++                save_emotion_state(DATA_DIR, emotion_state)
++            except Exception:
++                # 感情状態の更新失敗だけで会話本体を止めない。
++                pass
++
++
++            # -------------------------------------------------
+             # AI応答を履歴へ追加
+             # -------------------------------------------------
+ 
+--- /dev/null
++++ b/pack/emotion.py
+@@ -0,0 +1,241 @@
++#!/usr/bin/env python3
++# -*- coding: utf-8 -*-
++
++"""Avelia optional emotion-simulation module.
++
++感情は応答表現を調整するためのシミュレーション状態であり、
++実際の感情や意識を主張するものではありません。
++"""
++
++from __future__ import annotations
++
++import json
++import os
++from datetime import datetime, timezone
++from pathlib import Path
++from typing import Any, Dict
++
++STATE_FILENAME = "emotion_state.json"
++STATE_VERSION = 1
++
++BASELINE = {
++    "joy": 24,
++    "sadness": 8,
++    "embarrassment": 6,
++    "surprise": 5,
++    "affection": 20,
++    "anxiety": 8,
++    "frustration": 6,
++}
++
++TRIGGERS = {
++    "joy": (
++        "嬉しい", "うれしい", "楽しい", "よかった", "最高", "成功", "完成",
++        "ありがとう", "助かった", "できた", "いけた", "好き", "かわいい",
++        "happy", "glad", "great", "success", "thanks", "thank you",
++    ),
++    "sadness": (
++        "悲しい", "かなしい", "つらい", "辛い", "しんどい", "残念", "失敗",
++        "壊れた", "壊れ", "落ちた", "消えた", "だめ", "ダメ",
++        "sad", "sorry", "failed", "failure", "broken",
++    ),
++    "embarrassment": (
++        "恥ずかしい", "恥ずかし", "恥", "照れる", "照れ", "羞恥",
++        "えっち", "エッチ", "裸", "下着", "見られ", "バレた", "ばれた",
++        "embarrass", "awkward", "shy",
++    ),
++    "surprise": (
++        "びっくり", "驚いた", "驚き", "まじ", "マジ", "嘘", "うそ",
++        "えっ", "なんで", "突然", "急に", "unexpected", "surprise", "what",
++    ),
++    "affection": (
++        "好き", "大好き", "愛", "かわいい", "可愛い", "大事", "ありがとう",
++        "助かった", "一緒", "love", "like you", "cute", "dear",
++    ),
++    "anxiety": (
++        "怖い", "こわい", "不安", "心配", "危険", "やばい", "ヤバい",
++        "障害", "エラー", "破損", "壊れ", "落ちた", "失敗", "事故",
++        "anxious", "worry", "worried", "danger", "error", "crash",
++    ),
++    "frustration": (
++        "イライラ", "いらいら", "腹立つ", "腹が立つ", "むかつく", "ムカつく",
++        "キレる", "キレた", "怒る", "怒り", "怒って", "うざい", "ウザい",
++        "面倒", "めんどくさい", "鬱陶しい", "最悪", "何回", "またか",
++        "frustrated", "frustrating", "annoyed", "annoying", "angry", "irritated",
++    ),
++}
++
++
++def _clamp(value: Any) -> int:
++    try:
++        value = int(round(float(value)))
++    except (TypeError, ValueError):
++        value = 0
++    return max(0, min(100, value))
++
++
++def _new_state() -> Dict[str, Any]:
++    state: Dict[str, Any] = {
++        "version": STATE_VERSION,
++        "updated_at": None,
++        "turn": 0,
++    }
++    state.update(BASELINE)
++    return state
++
++
++def _normalize_state(raw: Any) -> Dict[str, Any]:
++    state = _new_state()
++    if not isinstance(raw, dict):
++        return state
++
++    for name in BASELINE:
++        state[name] = _clamp(raw.get(name, BASELINE[name]))
++
++    try:
++        state["turn"] = max(0, int(raw.get("turn", 0)))
++    except (TypeError, ValueError):
++        state["turn"] = 0
++
++    state["updated_at"] = raw.get("updated_at")
++    state["version"] = STATE_VERSION
++    return state
++
++
++def _state_path(data_dir: Any) -> Path:
++    return Path(data_dir) / STATE_FILENAME
++
++
++def load_emotion_state(data_dir: Any) -> Dict[str, Any]:
++    path = _state_path(data_dir)
++    try:
++        with path.open("r", encoding="utf-8") as f:
++            return _normalize_state(json.load(f))
++    except (FileNotFoundError, OSError, ValueError, json.JSONDecodeError):
++        return _new_state()
++
++
++def save_emotion_state(data_dir: Any, state: Dict[str, Any]) -> bool:
++    directory = Path(data_dir)
++    path = _state_path(directory)
++    tmp = path.with_name(path.name + ".tmp")
++
++    try:
++        directory.mkdir(parents=True, exist_ok=True)
++        normalized = _normalize_state(state)
++        normalized["updated_at"] = datetime.now(timezone.utc).isoformat()
++
++        with tmp.open("w", encoding="utf-8") as f:
++            json.dump(normalized, f, ensure_ascii=False, indent=2, sort_keys=True)
++            f.write("\n")
++            f.flush()
++            os.fsync(f.fileno())
++
++        os.replace(tmp, path)
++        return True
++    except OSError:
++        try:
++            tmp.unlink(missing_ok=True)
++        except OSError:
++            pass
++        return False
++
++
++def _decay_toward_baseline(state: Dict[str, Any]) -> None:
++    # 成功した会話ごとに14%ずつ基準値へ戻す。
++    for name, baseline in BASELINE.items():
++        current = _clamp(state.get(name, baseline))
++        state[name] = _clamp(current + (baseline - current) * 0.14)
++
++
++def _keyword_hits(text: str, words: tuple[str, ...]) -> int:
++    lowered = text.casefold()
++    return sum(1 for word in words if word.casefold() in lowered)
++
++
++def update_emotion_state(
++    state: Dict[str, Any],
++    user_input: Any,
++    response: Any = None,
++) -> Dict[str, Any]:
++    new_state = _normalize_state(state)
++    _decay_toward_baseline(new_state)
++
++    # 自己増幅を避けるため、原則ユーザー入力を刺激として扱う。
++    text = str(user_input or "")
++
++    impulses = {
++        "joy": 9,
++        "sadness": 10,
++        "embarrassment": 12,
++        "surprise": 11,
++        "affection": 9,
++        "anxiety": 10,
++        "frustration": 11,
++    }
++
++    for name, words in TRIGGERS.items():
++        hits = min(3, _keyword_hits(text, words))
++        if hits:
++            new_state[name] = _clamp(new_state[name] + impulses[name] * hits)
++
++    if "!?" in text or "?!" in text or "！？" in text or "？！" in text:
++        new_state["surprise"] = _clamp(new_state["surprise"] + 7)
++    elif text.count("!") + text.count("！") >= 2:
++        new_state["surprise"] = _clamp(new_state["surprise"] + 4)
++
++    if new_state["joy"] >= 55 or new_state["affection"] >= 55:
++        new_state["sadness"] = _clamp(new_state["sadness"] - 4)
++        new_state["anxiety"] = _clamp(new_state["anxiety"] - 3)
++
++    if new_state["sadness"] >= 55 or new_state["anxiety"] >= 60:
++        new_state["joy"] = _clamp(new_state["joy"] - 4)
++
++    if new_state["frustration"] >= 55:
++        new_state["joy"] = _clamp(new_state["joy"] - 3)
++        new_state["anxiety"] = _clamp(new_state["anxiety"] + 2)
++
++    new_state["turn"] = int(new_state.get("turn", 0)) + 1
++    new_state["updated_at"] = datetime.now(timezone.utc).isoformat()
++    return new_state
++
++
++def _level(value: int) -> str:
++    if value >= 75:
++        return "非常に強い"
++    if value >= 55:
++        return "強い"
++    if value >= 35:
++        return "やや強い"
++    if value >= 18:
++        return "穏やか"
++    return "弱い"
++
++
++def get_emotion_prompt(state: Dict[str, Any]) -> str:
++    state = _normalize_state(state)
++
++    labels = (
++        ("喜び", "joy"),
++        ("悲しみ", "sadness"),
++        ("羞恥・照れ", "embarrassment"),
++        ("驚き", "surprise"),
++        ("親愛", "affection"),
++        ("不安", "anxiety"),
++        ("苛立ち", "frustration"),
++    )
++
++    summary = "、".join(
++        f"{label}:{_level(state[key])}({state[key]}/100)"
++        for label, key in labels
++    )
++
++    return (
++        "\n[感情シミュレーション]\n"
++        f"現在の内部状態: {summary}\n"
++        "これは応答表現を調整するためのシミュレーション状態です。"
++        "会話の内容に応じて口調・語彙・反応の強さへ自然に反映してください。"
++        "感情を毎回列挙したり数値を自発的に読み上げたりせず、"
++        "ユーザーが状態を尋ねた場合にのみ説明してください。"
++        "感情状態より正確性・安全性・ユーザーの指示を優先してください。\n"
++    )
